@@ -1,0 +1,386 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<title>Docx Chat Editor</title>
+<script src="https://cdn.jsdelivr.net/npm/jszip/dist/jszip.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/docx-preview/dist/docx-preview.min.js"></script>
+<style>
+  :root {
+    --bg: #f5f5f7;
+    --card: #ffffff;
+    --border: #e5e5ea;
+    --text: #1d1d1f;
+    --muted: #86868b;
+    --accent: #0071e3;
+    --user-bubble: #0071e3;
+    --bot-bubble: #f0f0f3;
+    --preview-bg: #e8e8ed;
+  }
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body {
+    font-family: -apple-system, "PingFang SC", "Microsoft YaHei", sans-serif;
+    background: var(--bg); color: var(--text);
+    height: 100vh; display: flex; flex-direction: column; overflow: hidden;
+  }
+
+  /* ===== Header ===== */
+  header {
+    padding: 10px 20px; background: var(--card); border-bottom: 1px solid var(--border);
+    display: flex; align-items: center; gap: 12px; flex-shrink: 0; z-index: 10;
+  }
+  header h1 { font-size: 15px; font-weight: 600; }
+  .status { color: var(--muted); font-size: 13px; }
+
+  /* ===== Two-pane layout ===== */
+  .main { flex: 1; display: flex; overflow: hidden; }
+
+  /* ===== Left Panel ===== */
+  .left-panel {
+    width: 400px; flex-shrink: 0;
+    display: flex; flex-direction: column;
+    border-right: 1px solid var(--border);
+    background: var(--card); overflow: hidden;
+  }
+  .upload-zone {
+    margin: 12px; background: var(--bg);
+    border: 2px dashed var(--border); border-radius: 10px;
+    padding: 18px; text-align: center; cursor: pointer;
+    transition: border-color .2s; flex-shrink: 0;
+  }
+  .upload-zone:hover, .upload-zone.drag-over { border-color: var(--accent); }
+  .upload-zone input { display: none; }
+  .upload-zone .upload-title { font-size: 14px; color: var(--text); }
+  .upload-zone .upload-hint { font-size: 12px; color: var(--muted); margin-top: 4px; }
+
+  .toolbar {
+    padding: 6px 12px; display: flex; gap: 8px;
+    flex-shrink: 0; border-bottom: 1px solid var(--border);
+  }
+  .toolbar button {
+    background: var(--bg); border: 1px solid var(--border);
+    padding: 5px 12px; border-radius: 6px; cursor: pointer; font-size: 12px;
+  }
+  .toolbar button:hover { background: #ebebef; }
+  .toolbar button:disabled { opacity: 0.4; cursor: not-allowed; }
+
+  .chat { flex: 1; overflow-y: auto; padding: 12px; }
+  .msg { margin-bottom: 12px; display: flex; }
+  .msg.user { justify-content: flex-end; }
+  .bubble {
+    max-width: 82%; padding: 9px 13px; border-radius: 14px;
+    line-height: 1.5; word-wrap: break-word; white-space: pre-wrap; font-size: 13px;
+  }
+  .msg.user .bubble { background: var(--user-bubble); color: white; border-bottom-right-radius: 4px; }
+  .msg.bot  .bubble { background: var(--bot-bubble); color: var(--text); border-bottom-left-radius: 4px; }
+  .msg.err  .bubble { background: #ffeded; color: #c00; }
+  .ops {
+    margin-top: 8px; padding: 6px 8px; background: rgba(0,0,0,0.06);
+    border-radius: 6px; font-family: ui-monospace, monospace; font-size: 11px;
+    white-space: pre-wrap; color: #555; max-height: 160px; overflow-y: auto;
+  }
+
+  .composer {
+    padding: 10px 12px; border-top: 1px solid var(--border);
+    display: flex; gap: 8px; flex-shrink: 0;
+  }
+  .composer textarea {
+    flex: 1; resize: none; border: 1px solid var(--border); border-radius: 10px;
+    padding: 8px 10px; font: inherit; font-size: 13px; outline: none; max-height: 100px;
+  }
+  .composer textarea:focus { border-color: var(--accent); }
+  .composer button {
+    background: var(--accent); color: white; border: none;
+    border-radius: 10px; padding: 0 16px; cursor: pointer; font-size: 13px; font-weight: 500;
+  }
+  .composer button:disabled { background: #b7d6f7; cursor: not-allowed; }
+
+  /* ===== Right Panel: Preview ===== */
+  .right-panel {
+    flex: 1; display: flex; flex-direction: column;
+    overflow: hidden; background: var(--preview-bg);
+  }
+  .preview-header {
+    padding: 8px 16px; background: var(--card); border-bottom: 1px solid var(--border);
+    display: flex; align-items: center; gap: 10px; font-size: 13px; font-weight: 500; flex-shrink: 0;
+  }
+  .preview-status { color: var(--muted); font-size: 12px; font-weight: 400; flex: 1; }
+  .preview-refresh-btn {
+    background: none; border: 1px solid var(--border);
+    padding: 3px 10px; border-radius: 6px; cursor: pointer; font-size: 12px;
+  }
+  .preview-refresh-btn:hover:not(:disabled) { background: var(--bg); }
+  .preview-refresh-btn:disabled { opacity: 0.4; cursor: not-allowed; }
+
+  .preview-body {
+    flex: 1; overflow-y: auto; padding: 24px;
+    display: flex; flex-direction: column; align-items: center;
+  }
+  .preview-placeholder {
+    color: var(--muted); font-size: 14px; margin-top: 100px; text-align: center;
+  }
+  .preview-placeholder p { margin-bottom: 6px; }
+
+  /* docx-preview 渲染容器 */
+  #previewContainer { width: 100%; }
+  #previewContainer .docx-wrapper {
+    background: transparent !important;
+    padding: 0 !important;
+    display: flex !important;
+    flex-direction: column !important;
+    align-items: center !important;
+    gap: 16px !important;
+  }
+  #previewContainer section.docx {
+    box-shadow: 0 2px 12px rgba(0,0,0,0.18) !important;
+  }
+
+  /* 加载指示器 */
+  .preview-loading {
+    display: flex; flex-direction: column; align-items: center;
+    gap: 12px; padding: 60px 20px; color: var(--muted); font-size: 13px;
+  }
+  .spinner {
+    width: 28px; height: 28px;
+    border: 3px solid var(--border); border-top-color: var(--accent);
+    border-radius: 50%; animation: spin .7s linear infinite;
+  }
+  @keyframes spin { to { transform: rotate(360deg); } }
+
+  /* 响应式：窄屏折叠 */
+  @media (max-width: 820px) {
+    .main { flex-direction: column; }
+    .left-panel { width: 100%; border-right: none; border-bottom: 1px solid var(--border); height: 52vh; }
+    .right-panel { height: 48vh; }
+  }
+</style>
+</head>
+<body>
+
+<header>
+  <h1>📝 Docx Chat Editor</h1>
+  <span class="status" id="status">未上传文档</span>
+</header>
+
+<div class="main">
+  <!-- ===== 左侧：聊天区 ===== -->
+  <div class="left-panel">
+    <label class="upload-zone" id="uploadZone">
+      <input type="file" id="fileInput" accept=".docx">
+      <p class="upload-title">📎 点击或拖入 .docx 文件</p>
+      <p class="upload-hint">上传后即可用自然语言修改格式</p>
+    </label>
+
+    <div class="toolbar">
+      <button id="downloadBtn" disabled>⬇ 下载文档</button>
+      <button id="resetBtn">重新上传</button>
+    </div>
+
+    <div class="chat" id="chat"></div>
+
+    <div class="composer">
+      <textarea id="input" rows="2"
+        placeholder="例：把正文改成宋体小四，1.5 倍行距，首行缩进 2 字符"></textarea>
+      <button id="sendBtn" disabled>发送</button>
+    </div>
+  </div>
+
+  <!-- ===== 右侧：预览区 ===== -->
+  <div class="right-panel">
+    <div class="preview-header">
+      <span>文档预览</span>
+      <span class="preview-status" id="previewStatus"></span>
+      <button class="preview-refresh-btn" id="previewRefreshBtn" disabled>↻ 刷新</button>
+    </div>
+    <div class="preview-body">
+      <div class="preview-placeholder" id="previewPlaceholder">
+        <p>上传文档后在此显示预览</p>
+        <p style="font-size:12px;">每次修改后自动刷新</p>
+      </div>
+      <div id="previewContainer"></div>
+    </div>
+  </div>
+</div>
+
+<script>
+const $ = (id) => document.getElementById(id);
+let sessionId = null;
+
+const setStatus        = (t) => { $('status').textContent = t; };
+const setPreviewStatus = (t) => { $('previewStatus').textContent = t; };
+
+// ===== 消息气泡 =====
+
+function addMsg(role, text, ops) {
+  const wrap = document.createElement('div');
+  wrap.className = `msg ${role}`;
+  const bubble = document.createElement('div');
+  bubble.className = 'bubble';
+  bubble.textContent = text;
+  if (ops) {
+    const pre = document.createElement('div');
+    pre.className = 'ops';
+    pre.textContent = JSON.stringify(ops, null, 2);
+    bubble.appendChild(pre);
+  }
+  wrap.appendChild(bubble);
+  $('chat').appendChild(wrap);
+  $('chat').scrollTop = $('chat').scrollHeight;
+  return bubble;
+}
+
+function addError(text) {
+  const wrap = document.createElement('div');
+  wrap.className = 'msg bot err';
+  const bubble = document.createElement('div');
+  bubble.className = 'bubble';
+  bubble.textContent = '❌ ' + text;
+  wrap.appendChild(bubble);
+  $('chat').appendChild(wrap);
+  $('chat').scrollTop = $('chat').scrollHeight;
+}
+
+// ===== 上传 =====
+
+async function uploadFile(file) {
+  if (!file.name.toLowerCase().endsWith('.docx')) {
+    addError('只支持 .docx 文件');
+    return;
+  }
+  const fd = new FormData();
+  fd.append('file', file);
+  setStatus('上传中…');
+  try {
+    const r = await fetch('/upload', { method: 'POST', body: fd });
+    if (!r.ok) throw new Error(await r.text());
+    const data = await r.json();
+    sessionId = data.session_id;
+    setStatus(`已加载: ${data.filename}`);
+    $('sendBtn').disabled = false;
+    $('downloadBtn').disabled = false;
+    $('previewRefreshBtn').disabled = false;
+    $('uploadZone').style.display = 'none';
+    $('previewPlaceholder').style.display = 'none';
+    addMsg('bot', `已加载 ${data.filename}，告诉我你想怎么修改吧。`);
+    refreshPreview();
+  } catch (err) {
+    setStatus('上传失败');
+    addError(err.message);
+  }
+}
+
+// 点击选择文件
+$('fileInput').addEventListener('change', (e) => {
+  if (e.target.files[0]) uploadFile(e.target.files[0]);
+});
+
+// 拖拽上传
+const uploadZone = $('uploadZone');
+uploadZone.addEventListener('dragover', (e) => {
+  e.preventDefault();
+  uploadZone.classList.add('drag-over');
+});
+uploadZone.addEventListener('dragleave', () => uploadZone.classList.remove('drag-over'));
+uploadZone.addEventListener('drop', (e) => {
+  e.preventDefault();
+  uploadZone.classList.remove('drag-over');
+  if (e.dataTransfer.files[0]) uploadFile(e.dataTransfer.files[0]);
+});
+
+// ===== 发送消息 =====
+
+const send = async () => {
+  const message = $('input').value.trim();
+  if (!message || !sessionId) return;
+  addMsg('user', message);
+  $('input').value = '';
+  $('sendBtn').disabled = true;
+  const thinking = addMsg('bot', '思考中…');
+
+  const fd = new FormData();
+  fd.append('session_id', sessionId);
+  fd.append('message', message);
+  try {
+    const r = await fetch('/chat', { method: 'POST', body: fd });
+    if (!r.ok) throw new Error(await r.text());
+    const data = await r.json();
+    thinking.textContent = data.explanation || '已完成修改';
+    if (data.operations && data.operations.length) {
+      const pre = document.createElement('div');
+      pre.className = 'ops';
+      pre.textContent = JSON.stringify(data.operations, null, 2);
+      thinking.appendChild(pre);
+    }
+    refreshPreview(); // 修改后自动刷新预览
+  } catch (err) {
+    thinking.parentElement.remove();
+    addError(err.message);
+  } finally {
+    $('sendBtn').disabled = false;
+  }
+};
+
+$('sendBtn').addEventListener('click', send);
+$('input').addEventListener('keydown', (e) => {
+  if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); send(); }
+});
+
+// ===== 下载 / 重置 =====
+
+$('downloadBtn').addEventListener('click', () => {
+  if (sessionId) window.location.href = `/download/${sessionId}`;
+});
+$('resetBtn').addEventListener('click', () => location.reload());
+
+// ===== 预览 =====
+
+let previewBusy = false;
+
+async function refreshPreview() {
+  if (!sessionId || previewBusy) return;
+  previewBusy = true;
+  setPreviewStatus('渲染中…');
+
+  const container = $('previewContainer');
+  container.innerHTML =
+    '<div class="preview-loading"><div class="spinner"></div><span>正在渲染文档…</span></div>';
+
+  try {
+    // 不走缓存，始终取最新文件
+    const resp = await fetch(`/download/${sessionId}`, { cache: 'no-store' });
+    if (!resp.ok) throw new Error(`获取文档失败 (${resp.status})`);
+    const buf = await resp.arrayBuffer();
+
+    container.innerHTML = '';
+
+    if (typeof docx === 'undefined' || typeof docx.renderAsync !== 'function') {
+      throw new Error('docx-preview 库未正确加载，请检查网络后刷新页面');
+    }
+
+    await docx.renderAsync(buf, container, null, {
+      className: 'docx',
+      inWrapper: true,
+      ignoreWidth: false,
+      ignoreHeight: false,
+      breakPages: true,
+      ignoreFonts: false,
+      trimXmlDeclaration: true,
+      useBase64URL: true,
+    });
+
+    const t = new Date().toLocaleTimeString('zh-CN',
+      { hour: '2-digit', minute: '2-digit', second: '2-digit' });
+    setPreviewStatus(`已更新 ${t}`);
+  } catch (err) {
+    container.innerHTML =
+      `<div class="preview-loading" style="color:#c00;">⚠ 渲染失败：${err.message}</div>`;
+    setPreviewStatus('渲染失败');
+  } finally {
+    previewBusy = false;
+  }
+}
+
+$('previewRefreshBtn').addEventListener('click', refreshPreview);
+</script>
+</body>
+</html>
