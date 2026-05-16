@@ -6,7 +6,7 @@
 """
 
 # 类目展示顺序（前端折叠面板分组用）
-CATEGORY_ORDER = ["智能", "页面", "字体", "标题", "节专属", "题注", "表格", "页眉页脚", "编号"]
+CATEGORY_ORDER = ["智能", "页面", "字体", "标题", "节专属", "题注", "表格", "分节", "页眉页脚", "编号"]
 
 
 # 每条 default 结构：
@@ -238,16 +238,40 @@ DEFAULTS = [
         }],
     },
 
+    # ===== 分节（学位论文标准 4 分节，一键完成）=====
+    {
+        "id": "thesis_4_sections",
+        "name": "学位论文标准 4 分节（封面/前置/正文/后置 一键分节+页码页眉）",
+        "category": "分节",
+        "description": (
+            "最通用国标 / 高校统一版：自动插入 3 个分节符，把全文分成 4 节并配置——\n"
+            "① 封面+原创声明：无页眉、无页码\n"
+            "② 摘要+关键词+目录：无页眉；页码大写罗马 Ⅰ Ⅱ Ⅲ（从 Ⅰ 起）\n"
+            "③ 正文（绪论—结论）：奇偶页不同页眉（奇=论文题目，偶=学校+学位论文）；"
+            "页码阿拉伯 1 2 3（从 1 起）\n"
+            "④ 参考文献+致谢+附录：页眉同正文；页码接正文顺延\n"
+            "分节点自动识别（摘要 / 绪论·引言·第1章 / 参考文献），所有节取消链接到前一节。\n"
+            "题目与「学校+学位论文」自动从文档识别，识别不到时对应页眉留空。\n"
+            "推荐与「智能标题识别」一起勾选，确保章节具备标题样式以便准确分节。\n"
+            "本项已涵盖完整页眉页脚规范，无需再勾选下方单项页眉页脚条目。"
+        ),
+        "ops": [{"type": "thesis_sections"}],
+    },
+
     # ===== 页眉页脚 =====
+    # 整套学位论文标准（封面无页码 / 前置罗马 / 正文奇偶页眉+阿拉伯 / 后置顺延）
+    # 已由「分节」类目下的 thesis_4_sections 一键完成（底层走 section_* 原子操作）。
+    # 此处仅保留「全文统一、不分区」的简单页眉页脚条目，均不使用已废弃的 apply_to。
     {
         "id": "header_thesis_title",
-        "name": "页眉：论文题目居中",
+        "name": "页眉：全文论文题目居中（简洁版，不分区不分奇偶）",
         "category": "页眉页脚",
         "description": (
-            "把页眉设为论文题目（自动从文档内容识别实际题目，"
-            "不会把「论文题目」四个字字面写入），居中宋体小五。"
+            "把全文页眉统一设为论文题目（自动从文档内容识别实际题目，"
+            "不会把「论文题目」四个字字面写入），居中宋体小五。\n"
+            "适合无需分区/奇偶页不同页眉的简洁排版；要整套学位论文规范请用"
+            "「分节」类目下的「学位论文标准 4 分节」。"
         ),
-        # 注意：text 用占位符 {THESIS_TITLE}，由后端在 apply_defaults 时替换为实际题目
         "ops": [{
             "type": "header_footer",
             "properties": {
@@ -261,9 +285,12 @@ DEFAULTS = [
     },
     {
         "id": "footer_page_x_of_y",
-        "name": "页脚：第X页共Y页",
+        "name": "页脚：第X页共Y页（全文，替代纯数字）",
         "category": "页眉页脚",
-        "description": "页脚居中显示「第X页共Y页」格式，自动使用 Word 域更新",
+        "description": (
+            "页脚居中显示「第X页共Y页」格式，自动使用 Word 域更新。\n"
+            "作用于全文（不分区）；与「正文阿拉伯页码」二选一。"
+        ),
         "ops": [{
             "type": "header_footer",
             "properties": {
@@ -276,40 +303,17 @@ DEFAULTS = [
         }],
     },
     {
-        "id": "footer_body_only_page",
-        "name": "页脚：仅正文显示页码（从第一章起重新编号）",
-        "category": "页眉页脚",
-        "description": (
-            "在「第一章」前自动插入分节符；前置部分（封面/摘要/目录）页脚清空，"
-            "正文页脚居中显示阿拉伯页码并从第 1 页重新开始。"
-            "学位论文常用规范。如果文档无「第一章」，会回退到「绪论」/「引言」。"
-        ),
-        "ops": [{
-            "type": "header_footer",
-            "properties": {
-                "location": "footer",
-                "text": "{page}",
-                "alignment": "center",
-                "font_name": "Times New Roman",
-                "font_size": 10.5,
-                "apply_to": "body",
-                "body_marker": "第一章",
-                "restart_page_numbering": True,
-            },
-        }],
-    },
-    {
         "id": "footer_page_only",
-        "name": "页脚：仅页码",
+        "name": "页脚：仅页码（全文，不分区）",
         "category": "页眉页脚",
-        "description": "页脚居中显示当前页码数字（适合简洁排版）",
+        "description": "全文页脚居中显示当前页码数字（适合不区分前置/正文的简洁排版）",
         "ops": [{
             "type": "header_footer",
             "properties": {
                 "location": "footer",
                 "text": "{page}",
                 "alignment": "center",
-                "font_name": "Times New Roman",
+                "font_name_ascii": "Times New Roman",
                 "font_size": 10.5,
             },
         }],
@@ -360,21 +364,39 @@ DEFAULTS = [
         "ops": [{"type": "smart_outline"}],
     },
 
-    # ===== 自动题注 =====
+    # ===== 自动题注（三个独立功能：图 / 表 / 公式，均按章节 X-Y 编号）=====
     {
-        "id": "auto_caption_all",
-        "name": "全文自动加图表公式题注",
-        "category": "智能",
+        "id": "fig_caption_auto",
+        "name": "图编号：图下方按章节自动加图题",
+        "category": "题注",
         "description": (
-            "扫描全文图、表、公式并自动插入题注（按章节编号 X-Y）：\n"
-            "图题：图下方  ·  表题：表上方  ·  公式编号：公式右侧\n"
-            "已有题注会被覆盖。完成后自动调用「重新编号」填实际章节号。"
+            "扫描全文每张图片，在其下方插入「图 X-Y 说明」题注段落，并按章节统一编号。\n"
+            "章节识别：Heading 1 / 标题 1 / 一级标题；已有图题会被覆盖。\n"
+            "样式：图题（黑体居中，配合「智能论文样式」时格式自动到位）。"
         ),
-        "ops": [{
-            "type": "auto_caption",
-            "fig": True, "tbl": True, "eq": True,
-            "override_existing": True,
-        }],
+        "ops": [{"type": "fig_caption", "override_existing": True}],
+    },
+    {
+        "id": "tbl_caption_auto",
+        "name": "表编号：表上方按章节自动加表题",
+        "category": "题注",
+        "description": (
+            "扫描全文每个表格，在其上方插入「表 X-Y 说明」题注段落，并按章节统一编号。\n"
+            "章节识别：Heading 1 / 标题 1 / 一级标题；已有表题会被覆盖。\n"
+            "样式：表题（黑体居中，配合「智能论文样式」时格式自动到位）。"
+        ),
+        "ops": [{"type": "tbl_caption", "override_existing": True}],
+    },
+    {
+        "id": "eq_caption_auto",
+        "name": "公式编号：同行右对齐（双制表位）",
+        "category": "题注",
+        "description": (
+            "为每个公式段落追加 (X-Y) 章节编号。\n"
+            "通过双制表位实现：center@半宽 + right@全宽 —— 公式居中、编号右贴行尾，\n"
+            "避免给段落设右对齐导致公式整体贴右。已有内联编号会被替换。"
+        ),
+        "ops": [{"type": "eq_caption", "override_existing": True}],
     },
 
     # ===== TOC =====
@@ -403,8 +425,10 @@ DEFAULT_PRESELECTED = {
     "all_tables_three_line",
     "all_tables_continuation",
     "keyword_label_bold",
-    "footer_page_x_of_y",
-    "auto_caption_all",
+    "thesis_4_sections",
+    "fig_caption_auto",
+    "tbl_caption_auto",
+    "eq_caption_auto",
     "toc_after_marker",
     "renumber_all",
 }
@@ -430,11 +454,20 @@ _TYPE_ORDER = {
     "header_footer":       2,
     "smart_outline":       3,   # 先识别大纲层级
     "smart_thesis_format": 4,   # 论文命名样式在 smart_outline 之后，确保能覆盖冲突样式
+    "thesis_sections":     4.5, # 4 分节在标题样式就绪后执行，便于按章节准确分节
+    # 分节原子操作：先全部建分节符 → 再设链接 → 设页码 → 写页脚/页眉内容
+    "section_break":       4.5,
+    "section_link":        4.6,
+    "section_page_number": 4.7,
+    "footer_content":      4.8,
+    "header_content":      4.8,
     "format":              5,   # 内部还要按 target 细分（见 _format_subkey）
     "keyword_label":       6,
     "three_line_table":    7,
     "table_continuation":  8,   # 在三线表之后，避免边框被覆盖
-    "auto_caption":        9,   # 题注插入需在样式与表格设置之后
+    "fig_caption":         9,   # 图编号
+    "tbl_caption":         9,   # 表编号（与图编号互不影响，同 order）
+    "eq_caption":          9,   # 公式编号（双制表位）
     "caption":            10,
     "cross_ref":          11,
     "toc":                12,   # 目录依赖最终的标题样式
@@ -460,19 +493,24 @@ def _format_subkey(op):
     return 2  # 自定义命名样式
 
 
-def collect_ops(feature_ids, thesis_title=""):
+def collect_ops(feature_ids, thesis_title="", thesis_label=""):
     """收集所选 default 的 ops，按全局执行顺序排序，并解析占位符。
 
     占位符替换：
       {THESIS_TITLE} → 实际论文题目；找不到题目时该 op 被丢弃
+      {THESIS_LABEL} → 学校学位论文名（偶数页页眉用）；找不到时该 op 被丢弃
     """
+    placeholders = {
+        "{THESIS_TITLE}": thesis_title,
+        "{THESIS_LABEL}": thesis_label,
+    }
     ops = []
     id_set = set(feature_ids or [])
     for d in DEFAULTS:
         if d["id"] not in id_set:
             continue
         for op in d["ops"]:
-            resolved = _resolve_placeholders(op, thesis_title)
+            resolved = _resolve_placeholders(op, placeholders)
             if resolved is not None:
                 ops.append(resolved)
 
@@ -480,8 +518,12 @@ def collect_ops(feature_ids, thesis_title=""):
     return ops
 
 
-def _resolve_placeholders(op, thesis_title):
-    """递归替换 op 中的 {THESIS_TITLE} 占位符。返回 None 表示该 op 应跳过。"""
+def _resolve_placeholders(op, placeholders):
+    """递归替换 op 中的占位符（{THESIS_TITLE}/{THESIS_LABEL}）。
+
+    placeholders: {占位符文本: 实际值}；某占位符无值（空串）时，
+    含该占位符的整个 op 被跳过（返回 None）。
+    """
     import copy
     op = copy.deepcopy(op)
 
@@ -489,13 +531,17 @@ def _resolve_placeholders(op, thesis_title):
         if isinstance(node, dict):
             for k in list(node.keys()):
                 v = node[k]
-                if isinstance(v, str) and "{THESIS_TITLE}" in v:
-                    if not thesis_title:
-                        return False  # 没有题目可填 → 整个 op 跳过
-                    node[k] = v.replace("{THESIS_TITLE}", thesis_title)
-                else:
-                    if walk(v) is False:
-                        return False
+                if isinstance(v, str):
+                    matched = [ph for ph in placeholders if ph in v]
+                    if matched:
+                        if any(not placeholders[ph] for ph in matched):
+                            return False  # 占位符无可填值 → 整个 op 跳过
+                        for ph in matched:
+                            v = v.replace(ph, placeholders[ph])
+                        node[k] = v
+                        continue
+                if walk(v) is False:
+                    return False
         elif isinstance(node, list):
             for item in node:
                 if walk(item) is False:

@@ -23,10 +23,15 @@ from docx_formatter import (
     get_used_paragraph_styles,
     get_document_structure,
     get_document_title,
+    get_thesis_label,
     get_thesis_structure,
 )
 from schemas import ParsedCommand
 from defaults import get_defaults_metadata, collect_ops
+from extract import extract_any
+from knowledge_base import list_knowledge_sources, get_knowledge_source, refresh_knowledge
+from qa import answer_question
+from checker import run_checks
 
 
 app = FastAPI(title="Docx Chat Editor")
@@ -125,6 +130,15 @@ async def chat(session_id: str = Form(...), message: str = Form(...)):
     except Exception as e:
         raise HTTPException(500, f"指令解析失败：{e}")
 
+    # 2.5 LLM 信息不足时只返回澄清问题（operations 为空）→ 不动文档、不建快照
+    if not parsed.operations:
+        return {
+            "explanation":   parsed.explanation or "需要更多信息才能继续，请补充说明。",
+            "operations":    [],
+            "history_count": _history_count(session_dir),
+            "needs_input":   True,
+        }
+
     # 3. 操作前保存快照
     _save_snapshot(session_dir)
 
@@ -171,14 +185,18 @@ async def get_structure(session_id: str):
     if not doc_path.exists():
         raise HTTPException(404, "会话不存在或文档已丢失")
     try:
-        items = get_thesis_structure(str(doc_path))
+        sections = get_thesis_structure(str(doc_path))
     except Exception as e:
         raise HTTPException(500, f"结构识别失败：{e}")
-    # Compute summary stats
     from collections import Counter
-    counts = Counter(x["type"] for x in items)
+    # 扁平列表供统计（不含被过滤的内联类型，但需从原始调用处获取）
+    flat = [item for sec in sections.values() for item in sec]
+    counts = Counter(item["type"] for item in flat)
+    # 图/表/公式统计需从全文扫描（get_thesis_structure 已过滤，通过 get_document_structure 无法得到，
+    # 这里退化到用 flat；如需精确统计可调用独立扫描）
     return {
-        "items": items,
+        "sections": sections,
+        "items": flat,          # 向后兼容：前端可继续用 data.items
         "stats": {
             "headings":  sum(v for k, v in counts.items() if k.startswith("heading_")),
             "figures":   counts.get("figure_caption", 0),
@@ -281,12 +299,18 @@ async def batch_format(
             continue
 
         try:
-            # 每份文档单独解析 {THESIS_TITLE} 等占位符
+            # 每份文档单独解析 {THESIS_TITLE} / {THESIS_LABEL} 等占位符
             try:
                 thesis_title = get_document_title(str(in_path))
             except Exception:
                 thesis_title = ""
-            default_ops_raw = collect_ops(feature_id_list, thesis_title=thesis_title)
+            try:
+                thesis_label = get_thesis_label(str(in_path))
+            except Exception:
+                thesis_label = ""
+            default_ops_raw = collect_ops(
+                feature_id_list, thesis_title=thesis_title, thesis_label=thesis_label
+            )
             all_ops_raw = default_ops_raw + custom_ops_raw
             if not all_ops_raw:
                 results.append({"filename": name, "status": "error",
@@ -375,13 +399,17 @@ async def apply_defaults(
     if not ids:
         raise HTTPException(400, "至少勾选一项排版功能")
 
-    # 推断论文题目，用于 {THESIS_TITLE} 占位符替换
+    # 推断论文题目 / 学校学位论文名，用于 {THESIS_TITLE} / {THESIS_LABEL} 占位符替换
     try:
         thesis_title = get_document_title(str(doc_path))
     except Exception:
         thesis_title = ""
+    try:
+        thesis_label = get_thesis_label(str(doc_path))
+    except Exception:
+        thesis_label = ""
 
-    raw_ops = collect_ops(ids, thesis_title=thesis_title)
+    raw_ops = collect_ops(ids, thesis_title=thesis_title, thesis_label=thesis_label)
     if not raw_ops:
         raise HTTPException(400, "所选条目无可执行操作（可能因占位符无法解析全部跳过）")
 
@@ -402,12 +430,31 @@ async def apply_defaults(
     applied_names = [
         d["name"] for d in get_defaults_metadata() if d["id"] in ids
     ]
-    note = ""
-    if thesis_title and any(
-        "{THESIS_TITLE}" in str(_json.dumps(d, ensure_ascii=False))
-        for d in [d for d in __import__("defaults").DEFAULTS if d["id"] in ids]
-    ):
-        note = f"（页眉已自动填入识别出的论文题目：{thesis_title}）"
+    selected_defaults_json = _json.dumps(
+        [d for d in __import__("defaults").DEFAULTS if d["id"] in ids],
+        ensure_ascii=False,
+    )
+    note_parts = []
+    if thesis_title and "{THESIS_TITLE}" in selected_defaults_json:
+        note_parts.append(f"论文题目：{thesis_title}")
+    if thesis_label and "{THESIS_LABEL}" in selected_defaults_json:
+        note_parts.append(f"偶数页页眉：{thesis_label}")
+    note = f"（页眉已自动填入识别出的 {'；'.join(note_parts)}）" if note_parts else ""
+
+    # thesis_4_sections（一键 4 分节）无 LLM 可交互询问：检测不到学校/题目时
+    # 不污染页眉（已留空），但要明确告知用户如何补全。
+    if "thesis_4_sections" in ids:
+        miss = []
+        if not thesis_title:
+            miss.append("论文题目（奇数页页眉）")
+        if not thesis_label:
+            miss.append("学校学位论文名（偶数页页眉）")
+        if miss:
+            note += (
+                f"⚠️ 未能从文档可靠识别 {('、'.join(miss))}，对应页眉已留空（未填入猜测内容）。"
+                "可在对话框告诉我贵校全称与学历层次（本科/硕士/博士），我据此重设页眉；"
+                "或直接在 Word 中补填。"
+            )
 
     return {
         "explanation": (
@@ -422,147 +469,20 @@ async def apply_defaults(
 
 # ── 需求文档解析（PDF / DOCX / TXT → 纯文本）──
 
-# OCR 实例：首次使用时延迟加载，避免应用启动时间过长
-_OCR_INSTANCE = None
-
-def _get_ocr():
-    """单例加载 RapidOCR；首次调用约 1-2 秒。"""
-    global _OCR_INSTANCE
-    if _OCR_INSTANCE is None:
-        from rapidocr_onnxruntime import RapidOCR
-        _OCR_INSTANCE = RapidOCR()
-    return _OCR_INSTANCE
-
-
-def _extract_pdf_text_layer(data: bytes) -> str:
-    """优先 pypdf，其次 PyPDF2 提取 PDF 中的文本图层。扫描件返回空串。"""
-    reader = None
-    try:
-        from pypdf import PdfReader
-        reader = PdfReader(io.BytesIO(data))
-    except ImportError:
-        try:
-            from PyPDF2 import PdfReader
-            reader = PdfReader(io.BytesIO(data))
-        except ImportError:
-            return ""
-    parts = []
-    for page in reader.pages:
-        try:
-            parts.append(page.extract_text() or "")
-        except Exception:
-            continue
-    return "\n".join(parts).strip()
-
-
-def _extract_pdf_ocr(data: bytes, dpi: int = 200, max_pages: int = 30) -> str:
-    """对 PDF 每页渲染成图后逐页 OCR。适用于扫描件或图片型 PDF。
-
-    - dpi:        渲染分辨率，200 在速度/精度间较平衡
-    - max_pages:  最多处理页数，防止超大 PDF 阻塞
-    """
-    try:
-        import fitz  # PyMuPDF
-    except ImportError:
-        raise HTTPException(500, "缺少 PDF 渲染依赖：pip install pymupdf")
-    try:
-        ocr = _get_ocr()
-    except ImportError:
-        raise HTTPException(500, "缺少 OCR 依赖：pip install rapidocr_onnxruntime")
-
-    pdf = fitz.open(stream=data, filetype="pdf")
-    pages = pdf.page_count
-    if pages > max_pages:
-        pages_to_process = max_pages
-    else:
-        pages_to_process = pages
-
-    zoom = dpi / 72.0
-    mat  = fitz.Matrix(zoom, zoom)
-
-    parts = []
-    for i in range(pages_to_process):
-        page = pdf.load_page(i)
-        pix  = page.get_pixmap(matrix=mat, alpha=False)
-        img_bytes = pix.tobytes("png")
-        try:
-            result, _ = ocr(img_bytes)
-        except Exception:
-            continue
-        if result:
-            # result 形如 [[box, text, score], ...]
-            page_text = "\n".join(line[1] for line in result if line and len(line) >= 2)
-            if page_text.strip():
-                parts.append(page_text)
-    pdf.close()
-
-    out = "\n\n".join(parts).strip()
-    if pages > max_pages:
-        out += f"\n\n[文件共 {pages} 页，已 OCR 前 {max_pages} 页]"
-    return out
-
-
-def _extract_pdf(data: bytes):
-    """先尝试提取文本图层；若文字过少（疑似扫描件）自动回退 OCR。
-
-    返回 (text, ocr_used)。
-    """
-    text = _extract_pdf_text_layer(data)
-    # 文本图层结果过少（少于 20 个非空白字符）→ 判定为扫描件，走 OCR
-    meaningful = sum(1 for ch in text if not ch.isspace())
-    if meaningful >= 20:
-        return text, False
-    return _extract_pdf_ocr(data), True
-
-
-def _extract_docx(data: bytes) -> str:
-    from docx import Document
-    doc = Document(io.BytesIO(data))
-    parts = []
-    for p in doc.paragraphs:
-        if p.text.strip():
-            parts.append(p.text)
-    # 兼容表格里的格式要求（如毕业论文模板要求表）
-    for t in doc.tables:
-        for row in t.rows:
-            row_texts = [c.text.strip() for c in row.cells if c.text.strip()]
-            if row_texts:
-                parts.append(" | ".join(row_texts))
-    return "\n".join(parts).strip()
-
-
-def _extract_txt(data: bytes) -> str:
-    for enc in ("utf-8", "utf-8-sig", "gbk", "gb18030"):
-        try:
-            return data.decode(enc).strip()
-        except UnicodeDecodeError:
-            continue
-    return data.decode("utf-8", errors="replace").strip()
-
-
 @app.post("/extract_text")
 async def extract_text(file: UploadFile = File(...)):
     """从上传的 PDF / DOCX / TXT 中提取纯文本，供前端注入到指令输入框。
 
     PDF：先尝试文字图层，无文字（扫描件）自动走 OCR。
     """
-    name = (file.filename or "").lower()
     data = await file.read()
     if not data:
         raise HTTPException(400, "文件为空")
 
-    ocr_used = False
     try:
-        if name.endswith(".txt"):
-            text = _extract_txt(data)
-        elif name.endswith(".docx"):
-            text = _extract_docx(data)
-        elif name.endswith(".pdf"):
-            text, ocr_used = _extract_pdf(data)
-        else:
-            raise HTTPException(400, "仅支持 .pdf / .docx / .txt 文件")
-    except HTTPException:
-        raise
+        text, ocr_used = extract_any(file.filename or "", data)
+    except ValueError as e:
+        raise HTTPException(400, str(e))
     except Exception as e:
         raise HTTPException(500, f"文件解析失败：{e}")
 
@@ -575,6 +495,107 @@ async def extract_text(file: UploadFile = File(...)):
         "chars": len(text),
         "ocr_used": ocr_used,
     }
+
+
+# ── 问答模式：论文格式知识库 ──
+
+@app.get("/knowledge")
+async def knowledge_list():
+    """返回知识库来源清单（内置国标要点 + knowledge/ 目录 PDF）。"""
+    return {"sources": list_knowledge_sources()}
+
+
+@app.post("/knowledge/refresh")
+async def knowledge_refresh():
+    """重新扫描 knowledge/ 目录（投放新 PDF 后调用）。"""
+    n = refresh_knowledge()
+    return {"pdf_count": n, "sources": list_knowledge_sources()}
+
+
+@app.get("/knowledge/{source_id}/view")
+async def knowledge_view(source_id: str):
+    """查看原件：内置来源以 HTML 文本呈现；PDF 内联返回。"""
+    src = get_knowledge_source(source_id)
+    if src is None:
+        raise HTTPException(404, "知识库来源不存在")
+    if src["kind"] == "pdf":
+        return FileResponse(src["path"], media_type="application/pdf",
+                            filename=src["filename"])
+    body = escape_html_min(src["text"])
+    html = (
+        f"<!doctype html><meta charset='utf-8'>"
+        f"<title>{escape_html_min(src['title'])}</title>"
+        f"<body style='font:15px/1.7 -apple-system,Segoe UI,sans-serif;"
+        f"max-width:820px;margin:32px auto;padding:0 20px;color:#1a1a1a'>"
+        f"<pre style='white-space:pre-wrap;font-family:inherit'>{body}</pre></body>"
+    )
+    return HTMLResponse(html)
+
+
+def escape_html_min(s: str) -> str:
+    return (s.replace("&", "&amp;").replace("<", "&lt;")
+             .replace(">", "&gt;"))
+
+
+@app.post("/qa")
+async def qa(question: str = Form(...), history: str = Form("[]")):
+    """论文格式答疑。history: JSON 数组 [{role,content}, ...]，可选多轮上下文。"""
+    try:
+        hist = _json.loads(history) if history else []
+        if not isinstance(hist, list):
+            hist = []
+    except (ValueError, _json.JSONDecodeError):
+        hist = []
+    try:
+        answer = answer_question(question, history=hist)
+    except ValueError as e:
+        raise HTTPException(400, str(e))
+    except Exception as e:
+        raise HTTPException(500, f"问答失败：{e}")
+    return {"answer": answer}
+
+
+# ── 检查模式：论文合规性检查 ──
+
+@app.post("/check")
+async def check_thesis(
+    session_id: str = Form(...),
+    categories: str = Form("[]"),
+    review: UploadFile = File(None),
+):
+    """对会话中的当前论文执行合规检查。
+
+    categories: JSON 数组，可选 ["citation","reference_format","structure","compliance"]；
+                空数组 = 全部检查。
+    review:     可选的文献综述文件（docx/pdf/txt），用于引用对应性交叉核对。
+    """
+    session_dir = WORK_DIR / session_id
+    doc_path = session_dir / "current.docx"
+    if not doc_path.exists():
+        raise HTTPException(404, "会话不存在或文档已丢失，请先上传论文 docx")
+
+    try:
+        cats = _json.loads(categories) if categories else []
+        if not isinstance(cats, list):
+            cats = []
+    except (ValueError, _json.JSONDecodeError):
+        cats = []
+
+    review_path = None
+    if review is not None and review.filename:
+        rdata = await review.read()
+        if rdata:
+            review_path = session_dir / ("review" + Path(_safe_filename(review.filename)).suffix)
+            with open(review_path, "wb") as f:
+                f.write(rdata)
+
+    try:
+        report = run_checks(str(doc_path),
+                            review_path=str(review_path) if review_path else None,
+                            categories=cats)
+    except Exception as e:
+        raise HTTPException(500, f"检查失败：{e}")
+    return report
 
 
 if __name__ == "__main__":

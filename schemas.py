@@ -128,6 +128,16 @@ class HeaderFooterProperties(BaseModel):
             "若希望保留前置部分的页码序列连续，可设为 False。"
         )
     )
+    number_format: Optional[Literal["arabic", "roman_lower", "roman_upper"]] = Field(
+        None,
+        description=(
+            "页码数字格式：arabic=阿拉伯数字（1,2,3…，正文部分默认）；"
+            "roman_lower=小写罗马（i,ii,iii…，前置部分常用）；"
+            "roman_upper=大写罗马（I,II,III…）。"
+            "只对有 {page} 占位符的页脚/页眉有意义。"
+            "与 apply_to=front_matter/body 配合使用实现分区不同格式。"
+        )
+    )
 
 
 class HeaderFooterOperation(BaseModel):
@@ -248,24 +258,44 @@ class SmartOutlineOperation(BaseModel):
     )
 
 
-# ===== 自动题注 =====
+# ===== 自动题注（图/表/公式 三个独立功能）=====
 
-class AutoCaptionOperation(BaseModel):
-    """扫描全文为图/表/公式自动插入题注（按章节编号 X-Y）。
+class FigCaptionOperation(BaseModel):
+    """扫描全文为「图」自动插入题注（按章节编号 X-Y）。
 
-    位置：
-      图题：图片段落**下方**
-      表题：表格**上方**
-      公式编号：公式段落**右端**（使用右制表位）
-    现有题注存在时根据 override_existing 决定保留或覆盖。
+    位置：图片段落**下方**插入图题段落（样式：图题）。
+    现有图题存在时根据 override_existing 决定保留或覆盖。
     """
-    type: Literal["auto_caption"] = "auto_caption"
-    fig: bool = Field(True, description="是否处理图")
-    tbl: bool = Field(True, description="是否处理表")
-    eq:  bool = Field(True, description="是否处理公式")
+    type: Literal["fig_caption"] = "fig_caption"
     override_existing: bool = Field(
         True,
-        description="True 则先移除已有的相邻题注再重新插入；False 则跳过已有题注的对象"
+        description="True 则先移除已有的相邻图题再重新插入；False 则跳过已有图题的图"
+    )
+
+
+class TblCaptionOperation(BaseModel):
+    """扫描全文为「表」自动插入题注（按章节编号 X-Y）。
+
+    位置：表格**上方**插入表题段落（样式：表题）。
+    现有表题存在时根据 override_existing 决定保留或覆盖。
+    """
+    type: Literal["tbl_caption"] = "tbl_caption"
+    override_existing: bool = Field(
+        True,
+        description="True 则先移除已有的相邻表题再重新插入；False 则跳过已有表题的表"
+    )
+
+
+class EqCaptionOperation(BaseModel):
+    """扫描全文为「公式」追加章节编号（X-Y），编号右对齐于公式同行。
+
+    通过双制表位（center@半宽 + right@全宽）实现：
+      公式居中显示，编号 (X-Y) 右对齐于行尾——避免给段落设右对齐导致公式贴右。
+    """
+    type: Literal["eq_caption"] = "eq_caption"
+    override_existing: bool = Field(
+        True,
+        description="True 则替换已有的内联编号；False 则跳过已编号的公式（仍递增计数以避免重号）"
     )
 
 
@@ -287,6 +317,152 @@ class TocOperation(BaseModel):
     )
 
 
+class ThesisSectionsOperation(BaseModel):
+    """学位论文标准 4 分节（一键完成，最通用国标 / 高校统一版）。
+
+    自动插入 3 个分节符，把全文分成 4 节并分别配置页眉/页脚/页码：
+      第1节 封面+原创声明        无页眉、无页码
+      第2节 摘要+关键词+目录     无页眉；页码大写罗马 Ⅰ Ⅱ Ⅲ（从 Ⅰ 起）
+      第3节 正文（绪论—结论）    奇偶页不同页眉（奇=论文题目，偶=学校+学位论文）；
+                                 页码阿拉伯 1 2 3（从 1 起）
+      第4节 参考文献+致谢+附录   页眉同正文；页码接正文顺延（不重置）
+    所有节一律取消"链接到前一节"，确保各节独立。
+    分节点自动识别：摘要起点 / 正文起点(绪论·引言·第1章) / 后置起点(参考文献)；
+    某分节点缺失时自动降级合并，不报错。
+    """
+    type: Literal["thesis_sections"] = "thesis_sections"
+    thesis_title: Optional[str] = Field(
+        None, description="正文奇数页页眉文字；留空则自动从文档识别论文题目"
+    )
+    thesis_label: Optional[str] = Field(
+        None, description="正文偶数页页眉文字（如『某某大学硕士学位论文』）；留空则自动识别"
+    )
+    front_matter_format: Literal["roman_upper", "roman_lower"] = Field(
+        "roman_upper",
+        description="前置部分（摘要/目录）页码格式：roman_upper=Ⅰ Ⅱ Ⅲ（默认）/ roman_lower=ⅰ ⅱ ⅲ"
+    )
+    footer_text: str = Field(
+        "{page}",
+        description="正文及后置页脚格式，支持 {page}/{total}，如 '{page}' 或 '第{page}页 共{total}页'"
+    )
+    header_font_name: str = Field("宋体", description="页眉中文字体")
+    header_font_size: float = Field(9, description="页眉字号 pt（小五=9）")
+
+
+# ===== 分节原子操作（页码的稳定 Word 实体模型）=====
+# 设计原则：Word 中页码格式/重启/链接都属于 Section，footer 仅显示 PAGE 域。
+# 因此页码必须按 “先建分节符 → 设节页码 → 设页脚内容” 的稳定顺序生成，
+# 不再用 apply_to:body/front_matter 这类非 Word 实体的抽象。
+# 节定位统一用 marker 文字（与 section_break 一致），杜绝靠数字序号猜测错位。
+
+# target 取值约定（section_link / section_page_number / footer_content / header_content 通用）：
+#   - 精确文字（如 "第1章 绪论"）：定位到“包含该文字的顶层段落所在节”
+#   - "@first"      ：文档第 1 节（封面节）
+#   - "@abstract"   ：摘要所在节（前置节）
+#   - "@body"       ：正文起点所在节（绪论/引言/第1章）
+#   - "@references" ：参考文献所在节（后置节）
+
+_SectionTarget = str
+
+
+class SectionBreakProperties(BaseModel):
+    target: _SectionTarget = Field(
+        ...,
+        description="在“包含该文字的顶层段落”正前方插入分节符；支持 @abstract/@body/@references 等令牌"
+    )
+    position: Literal["before_heading"] = Field(
+        "before_heading", description="插入位置：before_heading=目标段落之前（目前仅此一种）"
+    )
+    break_type: Literal["next_page", "continuous", "even_page", "odd_page"] = Field(
+        "next_page", description="分节符类型，论文用 next_page（新节从下一页起）"
+    )
+
+
+class SectionBreakOperation(BaseModel):
+    """创建分节符（幂等：目标段前已有分节符则复用，不重复插入）。"""
+    type: Literal["section_break"] = "section_break"
+    properties: SectionBreakProperties
+
+
+class SectionLinkProperties(BaseModel):
+    target: _SectionTarget = Field(..., description="目标节定位（marker 文字或 @ 令牌）")
+    link_to_previous: bool = Field(
+        False,
+        description="是否链接到前一节；论文一律 false（各节页眉页脚独立，避免继承串内容）"
+    )
+
+
+class SectionLinkOperation(BaseModel):
+    """设置某节与前一节的链接关系（作用于该节 header/footer/奇偶/首页全部容器）。"""
+    type: Literal["section_link"] = "section_link"
+    properties: SectionLinkProperties
+
+
+class SectionPageNumberProperties(BaseModel):
+    target: _SectionTarget = Field(..., description="目标节定位（marker 文字或 @ 令牌）")
+    enabled: bool = Field(
+        True,
+        description="是否启用页码配置；false=删除该节 pgNumType（封面节用，彻底无页码）"
+    )
+    format: Literal["arabic", "roman_upper", "roman_lower"] = Field(
+        "arabic", description="页码格式：arabic=1 2 3 / roman_upper=Ⅰ Ⅱ Ⅲ / roman_lower=ⅰ ⅱ ⅲ"
+    )
+    restart: bool = Field(
+        False, description="是否在本节重启页码；false=接前一节顺延（如后置紧接正文）"
+    )
+    start: int = Field(1, ge=1, description="restart=true 时的起始页码")
+
+
+class SectionPageNumberOperation(BaseModel):
+    """设置某节的页码格式与重启（写入该节 sectPr 的 w:pgNumType——稳定 Word 实体）。"""
+    type: Literal["section_page_number"] = "section_page_number"
+    properties: SectionPageNumberProperties
+
+
+class FooterContentProperties(BaseModel):
+    target: _SectionTarget = Field(..., description="目标节定位（marker 文字或 @ 令牌）")
+    content: str = Field(
+        "{page}",
+        description="页脚内容，支持 {page}/{total}；空串=该节页脚清空（仅对显式指定的节）"
+    )
+    alignment: Literal["left", "center", "right"] = Field("center", description="对齐")
+    page_type: Literal["all", "odd", "even", "first"] = Field(
+        "all",
+        description="写入哪种页脚容器；all 在启用奇偶页时会同步写主/偶容器"
+    )
+    font_name: Optional[str] = Field(None, description="中文字体")
+    font_name_ascii: Optional[str] = Field(None, description="西文字体")
+    font_size: Optional[float] = Field(None, description="字号 pt")
+
+
+class FooterContentOperation(BaseModel):
+    """设置某节页脚内容（只负责显示 PAGE/NUMPAGES 域与文字，不含页码格式逻辑）。"""
+    type: Literal["footer_content"] = "footer_content"
+    properties: FooterContentProperties
+
+
+class HeaderContentProperties(BaseModel):
+    target: _SectionTarget = Field(..., description="目标节定位（marker 文字或 @ 令牌）")
+    content: str = Field(
+        "",
+        description="页眉内容，支持 {page}/{total}；空串=该节页眉清空"
+    )
+    alignment: Literal["left", "center", "right"] = Field("center", description="对齐")
+    page_type: Literal["all", "odd", "even", "first"] = Field(
+        "all",
+        description="写入哪种页眉容器；正文奇偶页不同时用 odd/even 分别设题目/学校名"
+    )
+    font_name: Optional[str] = Field(None, description="中文字体")
+    font_name_ascii: Optional[str] = Field(None, description="西文字体")
+    font_size: Optional[float] = Field(None, description="字号 pt")
+
+
+class HeaderContentOperation(BaseModel):
+    """设置某节页眉内容（奇偶页眉用 page_type=odd/even 分别写论文题目/学校名）。"""
+    type: Literal["header_content"] = "header_content"
+    properties: HeaderContentProperties
+
+
 # ===== 联合类型 =====
 
 AnyOperation = Annotated[
@@ -294,7 +470,11 @@ AnyOperation = Annotated[
         FormatOperation, PageSetupOperation, HeaderFooterOperation,
         KeywordLabelOperation, ThreeLineTableOperation, TableContinuationOperation,
         RenumberOperation, CaptionOperation, CrossRefOperation,
-        SmartThesisFormatOperation, SmartOutlineOperation, AutoCaptionOperation, TocOperation,
+        SmartThesisFormatOperation, SmartOutlineOperation,
+        FigCaptionOperation, TblCaptionOperation, EqCaptionOperation,
+        TocOperation, ThesisSectionsOperation,
+        SectionBreakOperation, SectionLinkOperation,
+        SectionPageNumberOperation, FooterContentOperation, HeaderContentOperation,
     ],
     Field(discriminator="type")
 ]

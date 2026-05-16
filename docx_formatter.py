@@ -22,9 +22,12 @@ from schemas import (
     KeywordLabelOperation,
     ThreeLineTableOperation, TableContinuationOperation,
     RenumberOperation, CaptionOperation, CrossRefOperation,
-    SmartThesisFormatOperation, SmartOutlineOperation, AutoCaptionOperation, TocOperation,
+    SmartThesisFormatOperation, SmartOutlineOperation,
+    FigCaptionOperation, TblCaptionOperation, EqCaptionOperation,
+    TocOperation, ThesisSectionsOperation,
+    SectionBreakOperation, SectionLinkOperation,
+    SectionPageNumberOperation, FooterContentOperation, HeaderContentOperation,
 )
-from numbering import renumber_all, insert_caption, insert_cross_ref
 
 _ALIGN_MAP = {
     "left": WD_ALIGN_PARAGRAPH.LEFT,
@@ -543,13 +546,31 @@ def _ensure_section_break_at_marker(doc, marker_text: str):
 
 
 def _set_pgnum_restart(section, start: int = 1):
-    """在该节 sectPr 内设置 <w:pgNumType w:start="1"/>，让页码从指定值重新开始。"""
+    """在该节 sectPr 内设置 <w:pgNumType w:start="N"/>，让页码从指定值重新开始。"""
     sectPr = section._sectPr
     pgNumType = sectPr.find(qn("w:pgNumType"))
     if pgNumType is None:
         pgNumType = OxmlElement("w:pgNumType")
         sectPr.append(pgNumType)
     pgNumType.set(qn("w:start"), str(start))
+
+
+_NUM_FMT_MAP = {
+    "arabic":      "decimal",
+    "roman_lower": "lowerRoman",
+    "roman_upper": "upperRoman",
+}
+
+def _set_pgnum_format(section, fmt: str):
+    """在该节 sectPr 内设置 <w:pgNumType w:fmt="…"/>，控制页码的显示格式。
+    fmt: 'decimal' / 'lowerRoman' / 'upperRoman'（OOXML 原生值）
+    """
+    sectPr = section._sectPr
+    pgNumType = sectPr.find(qn("w:pgNumType"))
+    if pgNumType is None:
+        pgNumType = OxmlElement("w:pgNumType")
+        sectPr.append(pgNumType)
+    pgNumType.set(qn("w:fmt"), fmt)
 
 
 def _clear_hf_container_fully(container):
@@ -559,6 +580,18 @@ def _clear_hf_container_fully(container):
         _clear_paragraph_content(para)
 
 
+_BODY_START_STYLE_NAMES = {"heading 1", "标题 1", "一级标题", "chapter 1"}
+
+def _auto_detect_body_marker(doc) -> str:
+    """找到文档中第一个 Heading 1（或等效样式）段落，返回其文字作为 body_marker 的推断值。"""
+    for para in doc.paragraphs:
+        if para.style and para.style.name.lower() in _BODY_START_STYLE_NAMES:
+            text = para.text.strip()
+            if text:
+                return text
+    return ""
+
+
 def _apply_header_footer(doc, props: HeaderFooterProperties):
     """写入页眉/页脚。
 
@@ -566,6 +599,8 @@ def _apply_header_footer(doc, props: HeaderFooterProperties):
       - apply_to="all"（默认）→ 全文档每一节
       - apply_to="body"        → 仅 body_marker 之后的节；自动插入分节符 + 默认重置页码
       - apply_to="front_matter"→ 仅 body_marker 之前的节
+
+    当 apply_to=body/front_matter 且 body_marker 未提供时，自动从文档首个 Heading 1 推断。
 
     奇偶页 bug 修复：
       page_type="all" 时若文档已启用奇偶页不同，"all" 必须**同步写入偶数页容器**，
@@ -579,11 +614,15 @@ def _apply_header_footer(doc, props: HeaderFooterProperties):
     target_sections = list(doc.sections)
     front_matter_sections = []
     if apply_to in ("body", "front_matter"):
-        if not props.body_marker:
-            raise ValueError("apply_to=body/front_matter 必须同时提供 body_marker（如'第一章'）")
-        body_idx, _marker_p = _ensure_section_break_at_marker(doc, props.body_marker)
+        body_marker = props.body_marker or _auto_detect_body_marker(doc)
+        if not body_marker:
+            raise ValueError(
+                "apply_to=body/front_matter 需要 body_marker（如'第一章'），"
+                "且文档中未找到 Heading 1 段落供自动推断"
+            )
+        body_idx, _marker_p = _ensure_section_break_at_marker(doc, body_marker)
         if body_idx is None:
-            raise ValueError(f"未在文档中找到包含 '{props.body_marker}' 的段落")
+            raise ValueError(f"未在文档中找到包含 '{body_marker}' 的段落")
         sections = list(doc.sections)
         if apply_to == "body":
             target_sections      = sections[body_idx:]
@@ -596,33 +635,39 @@ def _apply_header_footer(doc, props: HeaderFooterProperties):
         doc.settings.odd_and_even_pages_header_footer = True
     odd_even_active = bool(doc.settings.odd_and_even_pages_header_footer)
 
-    # 3. 对每个 target section 写入
-    for section in target_sections:
-        # apply_to != "all" 时把对应容器与前一节解绑，避免继承
-        if apply_to != "all":
-            try:
-                if is_header:
-                    section.header.is_linked_to_previous = False
-                else:
-                    section.footer.is_linked_to_previous = False
-            except Exception:
-                pass
+    def _decouple(container):
+        """apply_to != 'all' 时让该容器拥有独立部件，避免与前置/正文共用同一
+        header*.xml（共用会导致写正文偶数页眉时前置偶数页眉一起被写入）。"""
+        if apply_to == "all":
+            return
+        try:
+            container.is_linked_to_previous = False
+        except Exception:
+            pass
 
+    # 3. 对每个 target section 写入：先按 page_type 解析出目标容器，
+    #    解绑该容器（而非只解绑 primary），再写入。
+    for section in target_sections:
         if page_type == "first":
             section.different_first_page_header_footer = True
             container = section.first_page_header if is_header else section.first_page_footer
+            _decouple(container)
             _fill_hf_container(container, props)
         elif page_type == "odd":
             container = section.header if is_header else section.footer
+            _decouple(container)
             _fill_hf_container(container, props)
         elif page_type == "even":
             container = section.even_page_header if is_header else section.even_page_footer
+            _decouple(container)
             _fill_hf_container(container, props)
         else:  # page_type == "all"
             primary = section.header if is_header else section.footer
+            _decouple(primary)
             _fill_hf_container(primary, props)
             if odd_even_active:
                 even = section.even_page_header if is_header else section.even_page_footer
+                _decouple(even)
                 _fill_hf_container(even, props)
 
     # 4. apply_to=body 时：默认清空前置节同位置容器，且重新开始页码
@@ -630,17 +675,407 @@ def _apply_header_footer(doc, props: HeaderFooterProperties):
         # 默认重置页码（用户可显式设 False 关闭）
         if props.restart_page_numbering is not False and target_sections:
             _set_pgnum_restart(target_sections[0], start=1)
-        # 清空前置节同名容器，避免前置部分意外出现页眉/页脚
+        # 清空前置节同名容器（primary + even + first 全部），避免前置部分意外出现
+        # 页眉/页脚——尤其奇偶页模式下 even/first 容器可能与正文共用部件。
         for fs in front_matter_sections:
+            if is_header:
+                containers = (fs.header, fs.even_page_header, fs.first_page_header)
+            else:
+                containers = (fs.footer, fs.even_page_footer, fs.first_page_footer)
+            for c in containers:
+                try:
+                    c.is_linked_to_previous = False
+                    _clear_hf_container_fully(c)
+                except Exception:
+                    pass
+
+    # 5. 页码数字格式（arabic / roman_lower / roman_upper）
+    if props.number_format:
+        ooxml_fmt = _NUM_FMT_MAP.get(props.number_format, "decimal")
+        for s in target_sections:
             try:
-                if is_header:
-                    fs.header.is_linked_to_previous = False
-                    _clear_hf_container_fully(fs.header)
-                else:
-                    fs.footer.is_linked_to_previous = False
-                    _clear_hf_container_fully(fs.footer)
+                _set_pgnum_format(s, ooxml_fmt)
             except Exception:
                 pass
+
+
+# ============= 分节原子操作（页码的稳定 Word 实体模型）=============
+
+# 分节点用「文字」识别——_classify_thesis_para 遇标题样式会短路成 heading_N，
+# 致参考文献/致谢按类型匹配失效，故按文字判定，免疫标题样式。
+_TS_ABSTRACT_RE = re.compile(r"^\s*(?:中文)?摘\s*要\s*$")           # 独立「摘要」标题行
+# 内联形式：「摘  要：在高校……」（标签与正文同段，无独立标题行，论文中很常见）
+_TS_ABSTRACT_INLINE_RE = re.compile(r"^\s*(?:中文)?摘\s*要\s*[:：]")
+_TS_REF_RE = re.compile(r"^\s*(?:参\s*考\s*文\s*献|references?|bibliography)\s*$", re.I)  # 后置节起点
+# 正文节起点：第1章/第一章/Chapter 1/「1 绪论」 或 绪论/引言/前言/导论
+_TS_BODY_RE = re.compile(
+    r"^\s*(?:"
+    r"第\s*[1一]\s*[章篇]"
+    r"|chapter\s*(?:1|i)\b"
+    r"|1\s+\S"
+    r"|绪\s*论|引\s*言|前\s*言|序\s*言|导\s*论"
+    r")",
+    re.I,
+)
+_TS_TOKEN_RE = {"@abstract": _TS_ABSTRACT_RE, "@body": _TS_BODY_RE, "@references": _TS_REF_RE}
+
+_BREAK_TYPE_MAP = {
+    "next_page": "nextPage", "continuous": "continuous",
+    "even_page": "evenPage", "odd_page": "oddPage",
+}
+
+
+def _clear_pgnum(section):
+    """删除该节 sectPr 内的 <w:pgNumType>（封面节：彻底无页码配置）。"""
+    sectPr = section._sectPr
+    for el in list(sectPr.findall(qn("w:pgNumType"))):
+        sectPr.remove(el)
+
+
+def _clear_pgnum_restart(section):
+    """仅移除该节页码的 w:start（保留 fmt），使页码接前一节顺延。"""
+    sectPr = section._sectPr
+    pn = sectPr.find(qn("w:pgNumType"))
+    if pn is not None and pn.get(qn("w:start")) is not None:
+        del pn.attrib[qn("w:start")]
+
+
+def _first_para_matching(doc, regex):
+    """返回首个文字匹配 regex 的顶层 w:p；无则 None。"""
+    for child in doc.element.body:
+        if child.tag != qn("w:p"):
+            continue
+        text = "".join(t.text or "" for t in child.iter(qn("w:t"))).strip()
+        if text and regex.match(text):
+            return child
+    return None
+
+
+def _para_text(p_elem) -> str:
+    return "".join(t.text or "" for t in p_elem.iter(qn("w:t"))).strip()
+
+
+def _looks_like_title_line(text: str) -> bool:
+    """像（中文）论文题目的一行：含中文、长度合理、非封面样板、非结构标题。"""
+    if not text or not (4 <= len(text) <= 80):
+        return False
+    if not re.search(r"[一-鿿]", text):
+        return False
+    if _COVER_BOILERPLATE_RE.search(text):
+        return False
+    for rx in (_TS_ABSTRACT_RE, _TS_ABSTRACT_INLINE_RE, _TS_REF_RE, _TS_BODY_RE):
+        if rx.match(text):
+            return False
+    if re.match(r"^\s*(关键词|关键字|key\s*words?|abstract|目\s*录|contents)", text, re.I):
+        return False
+    return True
+
+
+def _abstract_section_start_para(doc):
+    """前置节（摘要页）真正的起点段落。
+
+    支持独立「摘要」标题行与内联「摘 要：…」两种。关键修复：摘要上方常紧跟
+    重复的中文论文题目（与摘要同页），若把分节符插在摘要前，题目会被 nextPage
+    分节符留在上一节末尾、单独成页。故向上跨过空行吸收紧邻的题目行，使分节符
+    落在题目之前——题目与摘要同处前置节首页，封面独立成节。
+    """
+    body = doc.element.body
+    abs_p = None
+    for child in body:
+        if child.tag != qn("w:p"):
+            continue
+        t = _para_text(child)
+        if t and (_TS_ABSTRACT_RE.match(t) or _TS_ABSTRACT_INLINE_RE.match(t)):
+            abs_p = child
+            break
+    if abs_p is None:
+        return None
+
+    start = abs_p
+    cur = abs_p.getprevious()
+    blanks = 0
+    titles = 0
+    while cur is not None and titles < 3 and blanks <= 4:
+        if cur.tag == qn("w:tbl"):
+            break
+        if cur.tag != qn("w:p"):
+            cur = cur.getprevious()
+            continue
+        txt = _para_text(cur)
+        if not txt:                       # 跨过题目与摘要间的空段
+            blanks += 1
+            cur = cur.getprevious()
+            continue
+        if _looks_like_title_line(txt):   # 吸收紧邻的（重复）中文题目行
+            start = cur
+            titles += 1
+            blanks = 0
+            cur = cur.getprevious()
+            continue
+        break                             # 遇封面样板/其他内容即停，保守不外扩
+    return start
+
+
+def _resolve_marker_para(doc, target: str):
+    """把 target（精确文字 / @abstract / @body / @references）解析为顶层 w:p。
+
+    @first / @last / @index:N 不对应具体段落，返回 None（由调用方按节序号处理）。
+    @abstract 经题目感知回退，确保摘要上方的中文题目与摘要同节同页。
+    """
+    if not target or target.startswith(("@first", "@last", "@index:")):
+        return None
+    if target == "@abstract":
+        return _abstract_section_start_para(doc)
+    if target in _TS_TOKEN_RE:
+        return _first_para_matching(doc, _TS_TOKEN_RE[target])
+    return _find_top_level_para_containing(doc.element.body, target)
+
+
+def _resolve_section_index(doc, target: str):
+    """把 target 解析为节序号（0-indexed）；解析不到返回 None。
+
+    支持：@first / @last / @index:N（内部编排用，序号由编排器在插入分节符后算得，
+    非 LLM 猜测）/ @abstract|@body|@references / 精确文字。
+    """
+    secs = list(doc.sections)
+    if not target:
+        return None
+    if target == "@first":
+        return 0
+    if target == "@last":
+        return len(secs) - 1
+    if target.startswith("@index:"):
+        try:
+            i = int(target.split(":", 1)[1])
+        except ValueError:
+            return None
+        return i if 0 <= i < len(secs) else None
+    para = _resolve_marker_para(doc, target)
+    if para is None:
+        return None
+    return _section_index_of(doc, para)
+
+
+def _hf_props(location, content, alignment, *, font_name=None,
+              font_name_ascii=None, font_size=None):
+    return HeaderFooterProperties(
+        location=location, text=content, alignment=alignment,
+        font_name=font_name, font_name_ascii=font_name_ascii, font_size=font_size,
+    )
+
+
+def _containers_for(section, is_header, page_type, odd_even_active):
+    """按 page_type 返回要写入的容器列表。"""
+    if page_type == "first":
+        section.different_first_page_header_footer = True
+        return [section.first_page_header if is_header else section.first_page_footer]
+    if page_type == "odd":
+        return [section.header if is_header else section.footer]
+    if page_type == "even":
+        return [section.even_page_header if is_header else section.even_page_footer]
+    # all：主容器；启用奇偶页时同步偶数页容器，避免偶数页空白
+    out = [section.header if is_header else section.footer]
+    if odd_even_active:
+        out.append(section.even_page_header if is_header else section.even_page_footer)
+    return out
+
+
+def _apply_section_break(doc, op: SectionBreakOperation):
+    p = op.properties
+    para = _resolve_marker_para(doc, p.target)
+    if para is None:
+        return  # 目标段落不存在 → 无法分节，静默跳过（编排器据此降级）
+    if not _has_section_break_immediately_before(para):
+        _insert_section_break_before(doc, para)
+    # 设置分节符类型（_insert_section_break_before 默认 nextPage）
+    prev = para.getprevious()
+    while prev is not None and prev.tag != qn("w:p"):
+        prev = prev.getprevious()
+    if prev is not None:
+        pPr = prev.find(qn("w:pPr"))
+        sectPr = pPr.find(qn("w:sectPr")) if pPr is not None else None
+        if sectPr is not None:
+            t = sectPr.find(qn("w:type"))
+            if t is None:
+                t = OxmlElement("w:type")
+                sectPr.insert(0, t)
+            t.set(qn("w:val"), _BREAK_TYPE_MAP.get(p.break_type, "nextPage"))
+
+
+def _apply_section_link(doc, op: SectionLinkOperation):
+    idx = _resolve_section_index(doc, op.properties.target)
+    if idx is None:
+        return
+    section = doc.sections[idx]
+    val = op.properties.link_to_previous
+    for attr in ("header", "footer", "even_page_header",
+                 "even_page_footer", "first_page_header", "first_page_footer"):
+        try:
+            getattr(section, attr).is_linked_to_previous = val
+        except Exception:
+            pass
+
+
+def _apply_section_page_number(doc, op: SectionPageNumberOperation):
+    idx = _resolve_section_index(doc, op.properties.target)
+    if idx is None:
+        return
+    section = doc.sections[idx]
+    p = op.properties
+    if not p.enabled:
+        _clear_pgnum(section)
+        return
+    _set_pgnum_format(section, _NUM_FMT_MAP.get(p.format, "decimal"))
+    if p.restart:
+        _set_pgnum_restart(section, p.start)
+    else:
+        _clear_pgnum_restart(section)   # 接前节顺延
+
+
+def _apply_hf_content(doc, op, is_header):
+    p = op.properties
+    idx = _resolve_section_index(doc, p.target)
+    if idx is None:
+        return
+    section = doc.sections[idx]
+    odd_even = bool(doc.settings.odd_and_even_pages_header_footer)
+    containers = _containers_for(section, is_header, p.page_type, odd_even)
+    for c in containers:
+        try:
+            c.is_linked_to_previous = False
+        except Exception:
+            pass
+        if p.content == "":
+            _clear_hf_container_fully(c)
+        else:
+            _fill_hf_container(c, _hf_props(
+                "header" if is_header else "footer",
+                p.content, p.alignment,
+                font_name=p.font_name, font_name_ascii=p.font_name_ascii,
+                font_size=p.font_size,
+            ))
+
+
+def _apply_footer_content(doc, op: FooterContentOperation):
+    _apply_hf_content(doc, op, is_header=False)
+
+
+def _apply_header_content(doc, op: HeaderContentOperation):
+    _apply_hf_content(doc, op, is_header=True)
+
+
+# ---- 学位论文标准 4 分节：编排上述原子操作（一键 UX 不变，底层走稳定模型）----
+
+def _mk(cls, **props):
+    """构造原子 op（properties 由对应 *Properties 校验）。"""
+    return cls(properties=props)
+
+
+def _apply_thesis_sections(doc, op: ThesisSectionsOperation):
+    """学位论文标准 4 分节。内部完全由 section_break/section_link/
+    section_page_number/footer_content/header_content 原子操作编排实现。"""
+    title = (op.thesis_title or "").strip() or _detect_title_from_doc(doc)
+    label = (op.thesis_label or "").strip() or _thesis_label_from_paras(
+        [pp.text.strip() for pp in doc.paragraphs[:30]]
+    )
+    tnr = "Times New Roman"
+    hfont, hsize = op.header_font_name, op.header_font_size
+
+    # 1) 先插入 3 个分节符（顺序：摘要 / 正文 / 参考文献）
+    for tok in ("@abstract", "@body", "@references"):
+        _apply_section_break(doc, _mk(SectionBreakOperation, target=tok,
+                                      break_type="next_page"))
+
+    # 2) 分节符就绪后解析各组节序号（由文档真实结构算得，非猜测）
+    secs = list(doc.sections)
+    n = len(secs)
+    i_front = _resolve_section_index(doc, "@abstract")
+    i_body  = _resolve_section_index(doc, "@body")
+    i_back  = _resolve_section_index(doc, "@references")
+    if i_body is None:
+        raise ValueError(
+            "未能识别正文起点（绪论/引言/第1章 等），无法执行学位论文标准分节。"
+            "建议先运行「智能标题识别」让章节具备标题样式。"
+        )
+    b_front = i_front if i_front is not None else 0
+    cover_idx = list(range(0, b_front))
+    front_idx = list(range(b_front, i_body))
+    back_start = i_back if i_back is not None else n
+    body_idx = list(range(i_body, back_start))
+    back_idx = list(range(back_start, n)) if i_back is not None else []
+    cover_merged_into_front = (not cover_idx) and bool(front_idx)
+
+    # 正文奇偶页眉 → 全局启用奇偶页不同（非正文节须同步清空偶数页容器）
+    doc.settings.odd_and_even_pages_header_footer = True
+
+    def link_off(i):
+        _apply_section_link(doc, _mk(SectionLinkOperation,
+                                     target=f"@index:{i}", link_to_previous=False))
+
+    def pgnum(i, *, enabled=True, fmt="arabic", restart=False, start=1):
+        _apply_section_page_number(doc, _mk(
+            SectionPageNumberOperation, target=f"@index:{i}",
+            enabled=enabled, format=fmt, restart=restart, start=start))
+
+    def footer(i, content, page_type="all"):
+        _apply_footer_content(doc, _mk(
+            FooterContentOperation, target=f"@index:{i}", content=content,
+            alignment="center", page_type=page_type, font_name_ascii=tnr,
+            font_size=10.5))
+
+    def header(i, content, page_type="all"):
+        _apply_header_content(doc, _mk(
+            HeaderContentOperation, target=f"@index:{i}", content=content,
+            alignment="center", page_type=page_type,
+            font_name=hfont, font_name_ascii=tnr, font_size=hsize))
+
+    # 第1节 封面+原创声明：取消链接 → 无页码 → 页眉页脚清空
+    for i in cover_idx:
+        doc.sections[i].different_first_page_header_footer = False
+        link_off(i)
+        pgnum(i, enabled=False)
+        header(i, "", "all")
+        footer(i, "", "all")
+
+    # 第2节 前置（摘要/关键词/目录）：无页眉；页脚罗马，从 Ⅰ 起
+    for k, i in enumerate(front_idx):
+        if cover_merged_into_front and k == 0:
+            doc.sections[i].different_first_page_header_footer = True
+            header(i, "", "first")
+            footer(i, "", "first")
+        else:
+            doc.sections[i].different_first_page_header_footer = False
+        link_off(i)
+        pgnum(i, enabled=True, fmt=op.front_matter_format,
+              restart=(k == 0), start=1)
+        header(i, "", "all")                       # 前置一律无页眉
+        footer(i, "{page}", "all")
+
+    # 第3节 正文（绪论—结论）：奇=题目 / 偶=学校；阿拉伯页码从 1
+    for k, i in enumerate(body_idx):
+        doc.sections[i].different_first_page_header_footer = False
+        link_off(i)
+        pgnum(i, enabled=True, fmt="arabic", restart=(k == 0), start=1)
+        if title:
+            header(i, title, "odd")
+        else:
+            header(i, "", "all")
+        if label:
+            header(i, label, "even")
+        footer(i, op.footer_text, "all")
+
+    # 第4节 后置（参考文献/致谢/附录）：页眉同正文；页码接正文顺延（不重置）
+    for i in back_idx:
+        doc.sections[i].different_first_page_header_footer = False
+        link_off(i)
+        pgnum(i, enabled=True, fmt="arabic", restart=False)
+        if title:
+            header(i, title, "odd")
+        else:
+            header(i, "", "all")
+        if label:
+            header(i, label, "even")
+        footer(i, op.footer_text, "all")
 
 
 # ============= 三线表 =============
@@ -818,42 +1253,72 @@ def _looks_like_en_title(text: str) -> bool:
     return ascii_ratio >= 0.65
 
 
-def get_thesis_structure(path: str) -> list:
-    """智能识别论文各类结构元素，返回带类型标注的列表。
+def get_thesis_structure(path: str) -> dict:
+    """智能识别论文结构，按封面/前置/正文/后置四大部分分组返回。
 
-    识别范围：论文题目/摘要/关键词/英文摘要/英文关键词/目录/
-    正文多级标题（含引言/绪论/结论）/图编号/表编号/公式编号/
-    致谢/参考文献/附录标题；封面样板文字自动跳过。
+    - 封面：论文题目、英文题目及封面样板段落（学号/日期等自动过滤）
+    - 前置：摘要、关键词、英文摘要/关键词、目录
+    - 正文：引言/绪论、各章节一二级标题、结论（三级及以上标题不进结构树）
+    - 后置：参考文献、附录、致谢
 
-    返回格式: [{"type": str, "label": str, "text": str, "index": int}, ...]
+    图题/表题/公式不进结构树（仅计入统计数据）。
+
+    返回格式:
+      {
+        "cover":        [{"type", "label", "text", "index"}, ...],
+        "front_matter": [...],
+        "body":         [...],
+        "back_matter":  [...],
+      }
     """
     doc = Document(path)
     items, abstract_pos, en_abstract_pos, toc_pos = _classify_thesis_paragraphs_in_doc(doc)
 
-    landmarks = [p for p in [abstract_pos, en_abstract_pos, toc_pos] if p is not None]
-    first_h1 = next(
-        (i for i, x in enumerate(items) if x["cls"] and x["cls"][0] == "heading_1" and i > 3),
-        None,
-    )
-    if first_h1 is not None:
-        landmarks.append(first_h1)
-    first_landmark = min(landmarks) if landmarks else None
+    _FRONT_MATTER_TYPES = {"abstract_h", "keywords_h", "en_abstract_h", "en_keywords_h", "toc_h"}
+    _BODY_START_TYPES   = {"intro_h1", "heading_1", "conclusion_h1"}
+    _BACK_MATTER_TYPES  = {"references", "acknowledgment", "appendix"}
+    _SKIP_TYPES         = {"figure_caption", "table_caption", "equation"}
 
-    keep_in_cover = {"thesis_title", "toc_h", "abstract_h", "en_abstract_h"}
-    result = []
+    first_fm   = next((i for i, x in enumerate(items) if x["cls"] and x["cls"][0] in _FRONT_MATTER_TYPES), None)
+    first_body = next((i for i, x in enumerate(items) if x["cls"] and x["cls"][0] in _BODY_START_TYPES
+                       and (first_fm is None or i > (first_fm or 0))), None)
+    first_back = next((i for i, x in enumerate(items) if x["cls"] and x["cls"][0] in _BACK_MATTER_TYPES), None)
+
+    sections: dict = {"cover": [], "front_matter": [], "body": [], "back_matter": []}
+
     for i, info in enumerate(items):
         if not info["cls"] or not info["text"]:
             continue
         type_key = info["cls"][0]
-        if first_landmark is not None and i < first_landmark and type_key not in keep_in_cover:
+
+        # 图/表/公式只计入统计，不进结构树
+        if type_key in _SKIP_TYPES:
             continue
-        result.append({
+
+        # 确定归属分区
+        if first_back is not None and i >= first_back:
+            sect = "back_matter"
+        elif first_body is not None and i >= first_body:
+            sect = "body"
+        elif first_fm is not None and i >= first_fm:
+            sect = "front_matter"
+        else:
+            sect = "cover"
+
+        # 正文中的三级及以上标题不进结构树
+        if sect == "body":
+            m = re.match(r"heading_(\d+)", type_key)
+            if m and int(m.group(1)) >= 3:
+                continue
+
+        sections[sect].append({
             "type":  type_key,
             "label": info["cls"][1],
             "text":  info["text"],
             "index": info["idx"],
         })
-    return result
+
+    return sections
 
 
 def get_document_structure(path: str) -> list:
@@ -918,6 +1383,85 @@ def get_document_title(path: str) -> str:
         candidates.sort(key=lambda x: -x[0])
         return candidates[0][1]
 
+    return ""
+
+
+# 学校名必须位于「边界」处（行首 / 标点 / 空白 / 标签后），避免把句中
+# “……系统在应急管理大学……”里的“系统在”一并吞进来造成污染。
+_SCHOOL_RE = re.compile(
+    r"(?:^|[\s：:、，,。．.\-—_|/／（）()【】\[\]<>《》\"“”'‘’　])"
+    r"([一-鿿]{2,10}(?:大学|学院))"
+)
+# 整行就是干净的「学校+(层次)+论文」名（允许少量分隔空格）
+_SCHOOL_FULLLINE_RE = re.compile(
+    r"^[一-鿿]{2,10}(?:大学|学院)"
+    r"[\s　]*(?:本科|学士|硕士|博士|研究生|专业)?[\s　]*生?"
+    r"[\s　]*(?:毕业论文|学位论文|毕业设计)$"
+)
+
+
+def _thesis_label_from_paras(paras: list) -> str:
+    """从（已 strip 的）封面段落文字列表中**保守地**猜测"学校学位论文名"。
+
+    1. 某段整行即干净的“学校+层次+论文”名 → 直接采用
+    2. 否则在边界处抽取「学校名」(……大学/……学院) 与「学位层次」拼装
+    3. 不确定一律返回空串——宁可留空让上层询问用户，也不输出被污染的串
+    """
+    paras = [t for t in paras if t and len(t) <= 40]
+
+    for text in paras:
+        if _SCHOOL_FULLLINE_RE.match(text):
+            return text
+
+    school = ""
+    for text in paras:
+        m = _SCHOOL_RE.search(text)
+        if m:
+            cand = m.group(1)
+            # 候选不得以常见介词/动词起头（边界正则已挡掉大半，这里再兜底）
+            if not cand.startswith(("系统", "基于", "关于", "针对", "面向", "研究")):
+                school = cand
+                break
+
+    level = ""
+    joined = "".join(paras)
+    for kw, label in (("博士", "博士"), ("硕士", "硕士"),
+                      ("学士", "本科"), ("本科", "本科"), ("研究生", "硕士")):
+        if kw in joined:
+            level = label
+            break
+
+    if school:
+        return f"{school}{level}学位论文" if level else f"{school}学位论文"
+    return ""
+
+
+def get_thesis_label(path: str) -> str:
+    """猜测论文的"学校学位论文名"，供偶数页页眉等场景（如"某某大学硕士学位论文"）。"""
+    doc = Document(path)
+    return _thesis_label_from_paras([p.text.strip() for p in doc.paragraphs[:30]])
+
+
+def _detect_title_from_doc(doc) -> str:
+    """在已打开的 doc 上猜测论文题目（精简版，供 thesis_sections 自动取页眉文字）。"""
+    TITLE_STYLE_HINTS = {"Title", "Subtitle", "题目", "论文题目", "标题", "封面标题"}
+    SKIP = ("摘要", "目录", "前言", "引言", "abstract", "contents",
+            "keywords", "关键词", "致谢", "声明", "封面", "原创")
+
+    def _ok(t: str) -> bool:
+        t = (t or "").strip()
+        return bool(t) and 4 <= len(t) <= 80 and not t.lower().startswith(SKIP)
+
+    for para in doc.paragraphs[:30]:
+        try:
+            sname = para.style.name or ""
+        except Exception:
+            sname = ""
+        if sname in TITLE_STYLE_HINTS and _ok(para.text):
+            return para.text.strip()
+    for para in doc.paragraphs[:50]:
+        if _get_heading_level(_paragraph_style_name(para)) == 1 and _ok(para.text):
+            return para.text.strip()
     return ""
 
 
@@ -1332,51 +1876,375 @@ def _apply_smart_outline(doc, op: SmartOutlineOperation):
             _set_p_style_id(p_elem, target_id)
 
 
-# ============= 自动题注（图/表/公式）=============
+# ============= 题注自动编号（内联，不依赖外部 numbering 模块）=============
 
-def _is_existing_caption(p_elem, cap_type: str) -> bool:
-    """判断段落是否已是某类型题注。两种判据：
-    1. 段落样式名为 图题/表题/公式编号
-    2. 文本以 "图 N" / "表 N" / "(N)" 起始
-    """
+_CAP_DASH      = r"\-−–—－‐"
+_CAP_STYLE_MAP = {"图": "图题", "表": "表题", "公式": "公式编号"}
+_CAP_BM_PRE    = {"图": "fig",  "表": "tab",  "公式": "eq"}
+_BUILTIN_CAP   = {"题注", "Caption"}
+_CAP_PAT = {
+    "图": re.compile(rf"^图\s*(\d[\d{_CAP_DASH}.]*|X[{_CAP_DASH}]Y)(?=\s|$)"),
+    "表": re.compile(rf"^表\s*(\d[\d{_CAP_DASH}.]*|X[{_CAP_DASH}]Y)(?=\s|$)"),
+    "公式": re.compile(rf"^\s*\((\d[\d{_CAP_DASH}.]*|X[{_CAP_DASH}]Y)\)\s*$"),
+}
+_EQ_INLINE_RE = re.compile(r"\t\([\dX][\d\-−–XY]*\)\s*$")
+
+
+def _ensure_caption_styles(doc):
+    for name in ("图题", "表题", "公式编号"):
+        try:
+            doc.styles[name]
+        except KeyError:
+            s = doc.styles.add_style(name, WD_STYLE_TYPE.PARAGRAPH)
+            s.base_style = doc.styles["Normal"]
+            s.paragraph_format.alignment = WD_ALIGN_PARAGRAPH.CENTER
+            s.paragraph_format.space_before = Pt(6)
+            s.paragraph_format.space_after  = Pt(6)
+
+
+def _max_bm_id(doc) -> int:
+    mx = 0
+    for bm in doc.element.body.iter(qn("w:bookmarkStart")):
+        try:
+            mx = max(mx, int(bm.get(qn("w:id"), 0)))
+        except (ValueError, TypeError):
+            pass
+    return mx
+
+
+def _cap_p_text(p_elem) -> str:
+    return "".join(t.text or "" for t in p_elem.iter(qn("w:t")))
+
+
+def _cap_p_sname(p_elem, id2name: dict) -> str:
     pPr = p_elem.find(qn("w:pPr"))
-    if pPr is not None:
-        pStyle = pPr.find(qn("w:pStyle"))
-        if pStyle is not None:
-            sid = pStyle.get(qn("w:val")) or ""
-            target_styles = {"图": ("图题",), "表": ("表题",), "公式": ("公式编号",)}.get(cap_type, ())
-            if sid in target_styles:
-                return True
-    text = "".join(t.text or "" for t in p_elem.iter(qn("w:t"))).strip()
-    if cap_type == "图":
-        return bool(re.match(r"^图\s*(?:\d|X)", text))
-    if cap_type == "表":
-        return bool(re.match(r"^表\s*(?:\d|X)", text))
-    if cap_type == "公式":
-        return bool(re.match(r"^\s*\(\s*(?:\d|X)", text))
+    if pPr is None:
+        return "Normal"
+    pSty = pPr.find(qn("w:pStyle"))
+    if pSty is None:
+        return "Normal"
+    return id2name.get(pSty.get(qn("w:val"), "Normal"), "Normal")
+
+
+def _detect_cap_type(text: str):
+    s = text.strip()
+    if not s or len(s) > 120:
+        return None
+    for ct, pat in _CAP_PAT.items():
+        if pat.match(s):
+            return ct
+    return None
+
+
+def _extract_fig_tbl_desc(text: str, prefix: str) -> str:
+    text = text.strip()
+    for pat in (
+        rf"^{re.escape(prefix)}\s*\d[\d{_CAP_DASH}.]*\s*",
+        rf"^{re.escape(prefix)}\s*X[{_CAP_DASH}]Y\s*",
+        rf"^{re.escape(prefix)}\s+",
+    ):
+        m = re.match(pat, text, re.I)
+        if m:
+            return text[m.end():].strip()
+    return ""
+
+
+def _bm_wrap(p_elem, text: str, bm_name: str, bm_id: int):
+    bm_s = OxmlElement("w:bookmarkStart")
+    bm_s.set(qn("w:id"), str(bm_id))
+    bm_s.set(qn("w:name"), bm_name)
+    p_elem.append(bm_s)
+    r = OxmlElement("w:r")
+    t = OxmlElement("w:t")
+    t.text = text
+    t.set(qn("xml:space"), "preserve")
+    r.append(t)
+    p_elem.append(r)
+    bm_e = OxmlElement("w:bookmarkEnd")
+    bm_e.set(qn("w:id"), str(bm_id))
+    p_elem.append(bm_e)
+
+
+def _write_fig_tbl_caption(p_elem, cap_type: str, num: str, desc: str, bm_name: str, bm_id: int):
+    pPr = p_elem.find(qn("w:pPr"))
+    for child in list(p_elem):
+        if child is not pPr:
+            p_elem.remove(child)
+    label = f"{cap_type} {num}" + (f" {desc}" if desc else "")
+    _bm_wrap(p_elem, label, bm_name, bm_id)
+
+
+# ── 公式内联编号工具 ──
+
+def _cap_text_width_twips(doc) -> int:
+    """文档文本区宽度（twips），用于制表位定位。"""
+    try:
+        s = doc.sections[0]
+        emu = s.page_width - s.left_margin - s.right_margin
+    except Exception:
+        emu = int(14.64 * 360000)  # A4 ~14.64 cm fallback
+    return max(1, int(emu * 1440 // 914400))
+
+
+def _eq_set_tabstops(p_elem, tw: int):
+    """双制表位：center@half + right@full，清除冲突的段落对齐和 oMathParaPr 居中。"""
+    pPr = p_elem.find(qn("w:pPr"))
+    if pPr is None:
+        pPr = OxmlElement("w:pPr")
+        p_elem.insert(0, pPr)
+    tabs = pPr.find(qn("w:tabs"))
+    if tabs is None:
+        tabs = OxmlElement("w:tabs")
+        pPr.append(tabs)
+    else:
+        for old in list(tabs):
+            tabs.remove(old)
+    for val, pos in (("center", tw // 2), ("right", tw)):
+        el = OxmlElement("w:tab")
+        el.set(qn("w:val"), val)
+        el.set(qn("w:pos"), str(pos))
+        tabs.append(el)
+    jc = pPr.find(qn("w:jc"))
+    if jc is not None:
+        pPr.remove(jc)
+    for ompp in p_elem.iter(qn("m:oMathParaPr")):
+        for mjc in list(ompp.findall(qn("m:jc"))):
+            ompp.remove(mjc)
+
+
+def _eq_insert_leading_tab(p_elem):
+    """在段落首个非 pPr 内容前插入前导制表符（幂等：已有则跳过）。"""
+    pPr = p_elem.find(qn("w:pPr"))
+    first = pPr.getnext() if pPr is not None else (p_elem[0] if len(p_elem) else None)
+    if first is None:
+        return
+    if first.tag == qn("w:r") and first.find(qn("w:tab")) is not None and not first.findall(qn("w:t")):
+        return  # 已有前导 tab
+    r = OxmlElement("w:r")
+    r.append(OxmlElement("w:tab"))
+    first.addprevious(r)
+
+
+def _eq_has_inline_num(p_elem) -> bool:
+    return bool(_EQ_INLINE_RE.search(_cap_p_text(p_elem)))
+
+
+def _eq_strip_inline_num(p_elem):
+    """移除末尾的 \\t(编号) runs 及首部前导 tab run。"""
+    for r in reversed(list(p_elem.findall(qn("w:r")))):
+        txt  = "".join(t.text or "" for t in r.iter(qn("w:t")))
+        is_tab = r.find(qn("w:tab")) is not None
+        is_num = bool(re.match(r"^\([\dX][\d\-−–XY]*\)$", txt.strip()))
+        if is_tab or is_num:
+            p_elem.remove(r)
+        else:
+            break
+    runs = p_elem.findall(qn("w:r"))
+    if runs and runs[0].find(qn("w:tab")) is not None and not runs[0].findall(qn("w:t")):
+        p_elem.remove(runs[0])
+
+
+def _eq_append_num(p_elem, num_str: str, bm_name: str, bm_id: int):
+    """追加 \\t(num_str) 到公式段落末尾。"""
+    tab_r = OxmlElement("w:r")
+    tab_r.append(OxmlElement("w:tab"))
+    p_elem.append(tab_r)
+    _bm_wrap(p_elem, f"({num_str})", bm_name, bm_id)
+
+
+# ── 章节一级标题检测 ──
+
+def _is_chapter_h1(sname: str, name_to_style: dict) -> bool:
+    """Heading 1 / 标题 1 / 一级标题（含继承链）→ True。"""
+    if not sname:
+        return False
+    if sname == "一级标题":
+        return True
+    seen: set = set()
+    cur = sname
+    while cur and cur not in seen:
+        seen.add(cur)
+        if re.match(r"^Heading\s*1$", cur) or re.match(r"^标题\s*1$", cur):
+            return True
+        style = name_to_style.get(cur)
+        if style is None:
+            return False
+        try:
+            base = style.base_style
+            cur = base.name if base is not None else None
+        except Exception:
+            return False
     return False
 
 
-def _make_placeholder_caption_para(doc, cap_type: str):
-    """生成一个占位题注段落 <w:p>，文本为"图 X-Y "/"表 X-Y "/"(X-Y)"，绑定对应样式。"""
-    from numbering import CAPTION_STYLE_MAP
-    style_name = CAPTION_STYLE_MAP[cap_type]
-    placeholder = f"{cap_type} X-Y " if cap_type != "公式" else "(X-Y)"
+# ── 公开 API ──
 
-    new_p = OxmlElement("w:p")
-    pPr = OxmlElement("w:pPr")
-    pSty = OxmlElement("w:pStyle")
-    pSty.set(qn("w:val"), _style_id(doc, style_name))
-    pPr.append(pSty)
-    new_p.append(pPr)
+def _renumber_doc(doc, types: set, override_existing: bool = True):
+    """按章节扫描全文，对指定类型的题注重新编号。
 
-    r = OxmlElement("w:r")
+    types               : {"图", "表", "公式"} 的子集；只重写命中类型的段落
+    override_existing   : 公式段落已有内联编号时，True=替换，False=保留并仅推进计数
+                           （图/表的"是否覆盖"由插入占位符阶段处理，这里始终重写）
+    章节识别：Heading 1 / 标题 1 / 一级标题（含继承自 Heading 1 的自定义样式）。
+    """
+    _ensure_caption_styles(doc)
+    body = doc.element.body
+
+    id2name: dict = {}
+    name2style: dict = {}
+    for s in doc.styles:
+        try:
+            id2name[s.style_id] = s.name
+            name2style[s.name]  = s
+        except Exception:
+            pass
+
+    has_chapters = any(
+        _is_chapter_h1(_cap_p_sname(c, id2name), name2style)
+        for c in body if c.tag == qn("w:p")
+    )
+    chapter = 0 if has_chapters else 1
+    counts  = {"图": 0, "表": 0, "公式": 0}
+    bm_id   = _max_bm_id(doc) + 1
+    text_w  = _cap_text_width_twips(doc)
+
+    for p_elem in body.iter(qn("w:p")):
+        sname = _cap_p_sname(p_elem, id2name)
+
+        # 顶层段落：一级标题 → 章节计数
+        if p_elem.getparent() is body and _is_chapter_h1(sname, name2style):
+            prev = chapter
+            chapter += 1
+            if prev > 0:
+                counts = {"图": 0, "表": 0, "公式": 0}
+            continue
+
+        # 公式：内联双制表位编号
+        if _para_has_equation(p_elem):
+            if "公式" not in types:
+                continue
+            ch = chapter if chapter > 0 else 1
+            counts["公式"] += 1
+            has_num = _eq_has_inline_num(p_elem)
+            if has_num and not override_existing:
+                continue  # 保留旧编号，仅推进计数以避免后续重号
+            if has_num:
+                _eq_strip_inline_num(p_elem)
+            _eq_set_tabstops(p_elem, text_w)
+            _eq_insert_leading_tab(p_elem)
+            num = f"{ch}-{counts['公式']}"
+            bm  = f"eq_{ch}_{counts['公式']}"
+            _eq_append_num(p_elem, num, bm, bm_id)
+            bm_id += 1
+            continue
+
+        # 图题 / 表题
+        cap_type = {"图题": "图", "表题": "表"}.get(sname)
+        if cap_type is None and sname in _BUILTIN_CAP:
+            cap_type = _detect_cap_type(_cap_p_text(p_elem))
+        if cap_type is None:
+            text = _cap_p_text(p_elem)
+            has_draw = next(p_elem.iter(qn("w:drawing")), None) is not None
+            if not has_draw:
+                detected = _detect_cap_type(text)
+                if detected in ("图", "表"):
+                    cap_type = detected
+                    sid = name2style.get(_CAP_STYLE_MAP[detected])
+                    if sid:
+                        pPr = p_elem.find(qn("w:pPr"))
+                        if pPr is None:
+                            pPr = OxmlElement("w:pPr"); p_elem.insert(0, pPr)
+                        pSty = pPr.find(qn("w:pStyle"))
+                        if pSty is None:
+                            pSty = OxmlElement("w:pStyle"); pPr.insert(0, pSty)
+                        pSty.set(qn("w:val"), sid.style_id)
+        if cap_type not in ("图", "表"):
+            continue
+        if cap_type not in types:
+            continue
+        ch = chapter if chapter > 0 else 1
+        counts[cap_type] += 1
+        num     = f"{ch}-{counts[cap_type]}"
+        bm_name = f"{_CAP_BM_PRE[cap_type]}_{ch}_{counts[cap_type]}"
+        desc    = _extract_fig_tbl_desc(_cap_p_text(p_elem), cap_type)
+        _write_fig_tbl_caption(p_elem, cap_type, num, desc, bm_name, bm_id)
+        bm_id += 1
+
+
+def renumber_all(doc):
+    """一次性对全文图/表/公式按章节重新编号（图题/表题/公式编号）。
+
+    供 RenumberOperation 使用；与 FigCaption/TblCaption/EqCaption 三个独立功能共用同一引擎。
+    """
+    _renumber_doc(doc, {"图", "表", "公式"}, override_existing=True)
+
+
+def insert_caption(doc, caption_type: str, after_text: str = None, description: str = None):
+    """插入题注占位符段落（图/表），随后由 renumber_all 填入实际编号。"""
+    _ensure_caption_styles(doc)
+    style_name  = _CAP_STYLE_MAP[caption_type]
+    desc_text   = description or "[请填写说明]"
+    placeholder = f"{caption_type} X-Y {desc_text}" if caption_type != "公式" else "(X-Y)"
+
+    ref = None
+    if after_text:
+        for p_elem in doc.element.body.iter(qn("w:p")):
+            if after_text in _cap_p_text(p_elem):
+                ref = p_elem
+                break
+    if ref is not None:
+        new_p = OxmlElement("w:p")
+        pPr   = OxmlElement("w:pPr")
+        pSty  = OxmlElement("w:pStyle")
+        pSty.set(qn("w:val"), _style_id(doc, style_name))
+        pPr.append(pSty)
+        new_p.append(pPr)
+        r = OxmlElement("w:r")
+        t = OxmlElement("w:t")
+        t.text = placeholder
+        t.set(qn("xml:space"), "preserve")
+        r.append(t)
+        new_p.append(r)
+        ref.addnext(new_p)
+    else:
+        p = doc.add_paragraph(style=style_name)
+        p.add_run(placeholder)
+
+
+def insert_cross_ref(doc, bookmark_name: str, display_text: str,
+                     in_paragraph_containing: str = None):
+    """在指定段落末尾追加 Word REF 域交叉引用。"""
+    target = None
+    if in_paragraph_containing:
+        for p_elem in doc.element.body.iter(qn("w:p")):
+            if in_paragraph_containing in _cap_p_text(p_elem):
+                target = p_elem
+                break
+    if target is None:
+        return
+
+    def _run(*children):
+        r = OxmlElement("w:r")
+        for c in children:
+            r.append(c)
+        target.append(r)
+
+    fc_begin = OxmlElement("w:fldChar")
+    fc_begin.set(qn("w:fldCharType"), "begin")
+    _run(fc_begin)
+    instr = OxmlElement("w:instrText")
+    instr.set(qn("xml:space"), "preserve")
+    instr.text = f" REF {bookmark_name} \\h "
+    _run(instr)
+    fc_sep = OxmlElement("w:fldChar")
+    fc_sep.set(qn("w:fldCharType"), "separate")
+    _run(fc_sep)
     t = OxmlElement("w:t")
-    t.text = placeholder
-    t.set(qn("xml:space"), "preserve")
-    r.append(t)
-    new_p.append(r)
-    return new_p
+    t.text = display_text
+    _run(t)
+    fc_end = OxmlElement("w:fldChar")
+    fc_end.set(qn("w:fldCharType"), "end")
+    _run(fc_end)
 
 
 def _para_has_drawing(p_elem) -> bool:
@@ -1390,53 +2258,87 @@ def _para_has_equation(p_elem) -> bool:
     return False
 
 
-def _apply_auto_caption(doc, op: AutoCaptionOperation):
-    """扫描全文为图/表/公式自动插入题注，最后调用 renumber_all 填实际编号。"""
-    from numbering import _ensure_caption_styles
+def _make_placeholder_fig_tbl_para(doc, cap_type: str):
+    """生成图题/表题占位段落 <w:p>（仅用于 fig/tbl，公式由 renumber_all 内联处理）。"""
+    style_name  = _CAP_STYLE_MAP[cap_type]
+    placeholder = f"{cap_type} X-Y "
+    new_p = OxmlElement("w:p")
+    pPr   = OxmlElement("w:pPr")
+    pSty  = OxmlElement("w:pStyle")
+    pSty.set(qn("w:val"), _style_id(doc, style_name))
+    pPr.append(pSty)
+    new_p.append(pPr)
+    r = OxmlElement("w:r")
+    t = OxmlElement("w:t")
+    t.text = placeholder
+    t.set(qn("xml:space"), "preserve")
+    r.append(t)
+    new_p.append(r)
+    return new_p
+
+
+def _is_existing_fig_tbl_caption(p_elem, cap_type: str) -> bool:
+    """判断段落是否已是图题/表题。"""
+    pPr = p_elem.find(qn("w:pPr"))
+    if pPr is not None:
+        pSty = pPr.find(qn("w:pStyle"))
+        if pSty is not None:
+            sid = pSty.get(qn("w:val")) or ""
+            if (cap_type == "图" and sid == "图题") or (cap_type == "表" and sid == "表题"):
+                return True
+    text = _cap_p_text(p_elem).strip()
+    if cap_type == "图":
+        return bool(re.match(r"^图\s*(?:\d|X)", text))
+    if cap_type == "表":
+        return bool(re.match(r"^表\s*(?:\d|X)", text))
+    return False
+
+
+def _insert_fig_placeholders(doc, override_existing: bool):
+    """在每个含图片的段落后插入「图 X-Y …」占位题注。"""
     _ensure_caption_styles(doc)
     body = doc.element.body
-
-    # 用快照避免遍历过程中修改 body 子节点导致迭代异常
-    children = list(body)
-    for child in children:
-        tag = child.tag
-
-        # 图：在图片段落"下方"插题注
-        if tag == qn("w:p") and op.fig and _para_has_drawing(child):
-            nxt = child.getnext()
-            if nxt is not None and nxt.tag == qn("w:p") and _is_existing_caption(nxt, "图"):
-                if not op.override_existing:
-                    continue
-                body.remove(nxt)
-            cap = _make_placeholder_caption_para(doc, "图")
-            child.addnext(cap)
+    for child in list(body):
+        if child.tag != qn("w:p") or not _para_has_drawing(child):
             continue
+        nxt = child.getnext()
+        if nxt is not None and nxt.tag == qn("w:p") and _is_existing_fig_tbl_caption(nxt, "图"):
+            if not override_existing:
+                continue
+            body.remove(nxt)
+        child.addnext(_make_placeholder_fig_tbl_para(doc, "图"))
 
-        # 公式：在公式段落"右侧"加编号（公式段落自身就是题注的载体）
-        if tag == qn("w:p") and op.eq and _para_has_equation(child):
-            # 已有公式编号的判定：段落末尾已含 "(X-Y)" 或 "(N-M)"
-            text = "".join(t.text or "" for t in child.iter(qn("w:t"))).strip()
-            if re.search(r"\(\s*[\dXxYy\-−–]+\)\s*$", text):
-                if not op.override_existing:
-                    continue
-                # 简单覆盖策略：在该公式段落下面新建一个独立公式编号段落
-            cap = _make_placeholder_caption_para(doc, "公式")
-            child.addnext(cap)
+
+def _insert_tbl_placeholders(doc, override_existing: bool):
+    """在每个表格上方插入「表 X-Y …」占位题注。"""
+    _ensure_caption_styles(doc)
+    body = doc.element.body
+    for child in list(body):
+        if child.tag != qn("w:tbl"):
             continue
+        prev = child.getprevious()
+        if prev is not None and prev.tag == qn("w:p") and _is_existing_fig_tbl_caption(prev, "表"):
+            if not override_existing:
+                continue
+            body.remove(prev)
+        child.addprevious(_make_placeholder_fig_tbl_para(doc, "表"))
 
-        # 表：在表格"上方"插题注
-        if tag == qn("w:tbl") and op.tbl:
-            prev = child.getprevious()
-            if prev is not None and prev.tag == qn("w:p") and _is_existing_caption(prev, "表"):
-                if not op.override_existing:
-                    continue
-                body.remove(prev)
-            cap = _make_placeholder_caption_para(doc, "表")
-            child.addprevious(cap)
-            continue
 
-    # 占位符 X-Y 由 renumber_all 替换为真正的"章节-序号"
-    renumber_all(doc)
+def _apply_fig_caption(doc, op: FigCaptionOperation):
+    """图编号：插入图题占位段落 + 按章节重新编号所有图题。"""
+    _insert_fig_placeholders(doc, op.override_existing)
+    _renumber_doc(doc, {"图"}, op.override_existing)
+
+
+def _apply_tbl_caption(doc, op: TblCaptionOperation):
+    """表编号：插入表题占位段落 + 按章节重新编号所有表题。"""
+    _insert_tbl_placeholders(doc, op.override_existing)
+    _renumber_doc(doc, {"表"}, op.override_existing)
+
+
+def _apply_eq_caption(doc, op: EqCaptionOperation):
+    """公式编号：以双制表位方式给公式段落追加 (X-Y) 编号，公式居中、编号右对齐。"""
+    _renumber_doc(doc, {"公式"}, op.override_existing)
 
 
 # ============= TOC 域（目录）=============
@@ -1896,11 +2798,27 @@ def apply_operations(input_path: str, output_path: str, operations):
             _apply_smart_thesis_format(doc, op)
         elif isinstance(op, SmartOutlineOperation):
             _apply_smart_outline(doc, op)
-        elif isinstance(op, AutoCaptionOperation):
-            _apply_auto_caption(doc, op)
-            # auto_caption 已自带 renumber_all，不再额外触发
+        elif isinstance(op, FigCaptionOperation):
+            _apply_fig_caption(doc, op)
+            # 已自带 renumber，不再额外触发
+        elif isinstance(op, TblCaptionOperation):
+            _apply_tbl_caption(doc, op)
+        elif isinstance(op, EqCaptionOperation):
+            _apply_eq_caption(doc, op)
         elif isinstance(op, TocOperation):
             _apply_toc(doc, op)
+        elif isinstance(op, ThesisSectionsOperation):
+            _apply_thesis_sections(doc, op)
+        elif isinstance(op, SectionBreakOperation):
+            _apply_section_break(doc, op)
+        elif isinstance(op, SectionLinkOperation):
+            _apply_section_link(doc, op)
+        elif isinstance(op, SectionPageNumberOperation):
+            _apply_section_page_number(doc, op)
+        elif isinstance(op, FooterContentOperation):
+            _apply_footer_content(doc, op)
+        elif isinstance(op, HeaderContentOperation):
+            _apply_header_content(doc, op)
 
     # 插入题注后统一重新编号一次
     if needs_renumber:
