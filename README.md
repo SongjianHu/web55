@@ -6,25 +6,43 @@
 ## 项目结构
 
 ```
-docx_chat_editor/
-├── main.py              # FastAPI 服务（上传/聊天/下载）
-├── llm_parser.py        # LLM → 结构化指令
-├── docx_formatter.py    # python-docx 执行层
-├── schemas.py           # Pydantic 数据模型
-├── static/index.html    # 聊天前端
+web55/
+├── app/                   # 业务代码包
+│   ├── __init__.py        # 包入口，启动时加载 .env
+│   ├── main.py            # FastAPI 服务（上传/聊天/撤销/下载/检查/问答）
+│   ├── llm_parser.py      # 自然语言指令 → 结构化操作（Anthropic）
+│   ├── docx_formatter.py  # python-docx 执行层
+│   ├── schemas.py         # Pydantic 数据模型
+│   ├── defaults.py        # 排版默认值与一键排版操作集
+│   ├── extract.py         # PDF/文档文本提取
+│   ├── knowledge_base.py  # 国标知识库（knowledge/ 入库与检索）
+│   ├── qa.py              # 问答模式
+│   ├── checker.py         # 论文格式检查
+│   ├── openalex_search.py # OpenAlex 文献检索
+│   └── zotero_save.py     # 存入 Zotero
+├── static/index.html      # 聊天前端
+├── knowledge/             # 国标 PDF 知识库（随仓库分发）
+├── docs/                  # API / 使用 / 技术文档
+├── sessions/              # 运行时自动创建，每个会话的工作文档（已 gitignore）
+├── run.py                 # 开发启动入口
 ├── requirements.txt
-└── sessions/            # 运行时自动创建，存放每个会话的工作文档
+├── pyproject.toml         # 项目元数据与工具配置
+├── .env.example           # 环境变量模板（复制为 .env）
+└── README.md
 ```
 
 ## 启动
 
 ```bash
 pip install -r requirements.txt
-set ANTHROPIC_API_KEY=sk-ant-xxx     # Linux/Mac: export ANTHROPIC_API_KEY=sk-ant-xxx
-python main.py
+copy .env.example .env       # Linux/Mac: cp .env.example .env
+# 编辑 .env，填入 ANTHROPIC_API_KEY（也可改用 set/export 注入环境变量）
+python run.py
 ```
 
 打开 http://127.0.0.1:8000
+
+> 生产部署可直接 `uvicorn app.main:app --host 0.0.0.0 --port 8000`。
 
 ## 使用示例
 

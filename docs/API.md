@@ -32,6 +32,10 @@
 | POST | /batch | 批量排版（多文档） |
 | GET | /batch/{batch_id}/download | 下载批量结果 zip |
 | POST | /extract_text | 解析 PDF/DOCX/TXT 为纯文本 |
+| POST | /qa | 论文格式答疑（可附带检索文献） |
+| GET | /openalex/defaults | 默认年份范围（近三年） |
+| POST | /openalex/search | OpenAlex 文献检索（GB/T 7714 著录） |
+| POST | /zotero/save | 把勾选文献存入用户 Zotero 库 |
 
 ## 4. 接口详情
 
@@ -229,3 +233,95 @@
 - 可能错误：
   - 400 文件为空 / 格式不支持 / 未提取到文字
   - 500 缺少 OCR 依赖或解析失败
+
+### 4.12 POST /qa
+
+论文格式答疑（基于 GB/T 7714 / GB/T 7713 知识库）。
+
+- 请求：multipart/form-data
+  - question: 问题文本（附带 references 时可为空）
+  - history: JSON 数组 `[{role,content}, ...]`，可选多轮上下文
+  - references: JSON 字符串数组，用户从 OpenAlex 检索勾选带入的 GB/T 7714 著录串；
+    存在时助手据此校对/生成参考文献（question 可为空）
+- 返回：`{ "answer": "..." }`
+- 可能错误：
+  - 400 问题为空（且未附文献）
+  - 500 问答失败
+
+### 4.13 GET /openalex/defaults
+
+返回默认年份范围（近三年：当前年及前两年），供前端初始化年份输入框。
+
+- 返回：`{ "from_year": 2024, "to_year": 2026 }`
+
+### 4.14 POST /openalex/search
+
+按关键词检索 OpenAlex。内置中英学术同义词词典对查询词做扩展，
+跨同义词合并去重后按被引量/年份排序；每条附 GB/T 7714—2015 著录串。
+
+OpenAlex 现需免费 API Key（注册 https://openalex.org/settings/api）。
+api_key 由前端传入；缺省回退环境变量 `OPENALEX_API_KEY`。
+
+- 请求：multipart/form-data
+  - query: 检索关键词（中/英均可）
+  - from_year / to_year: 可选，缺省为近三年
+  - limit: 返回上限（默认 20，最大 50）
+  - api_key: OpenAlex 免费 Key（可选，缺省用 env）
+- 返回：
+
+```json
+{
+  "count": 1,
+  "terms": ["深度学习", "deep learning", "deep neural network"],
+  "year_range": [2024, 2026],
+  "partial": false,
+  "items": [
+    {
+      "id": "https://openalex.org/W123",
+      "title": "A deep learning approach ...",
+      "authors": "Smith J., Doe A.",
+      "year": "2024",
+      "itemType": "journalArticle",
+      "publication": "Nature",
+      "publisher": "",
+      "volume": "5", "issue": "2", "pages": "1-10",
+      "doi": "10.1038/xxx",
+      "url": "https://doi.org/10.1038/xxx",
+      "cited_by": 12,
+      "creators": [{"firstName": "J", "lastName": "Smith"}],
+      "abstract": "...",
+      "citation": "Smith J., Doe A.. A deep learning approach[J]. Nature,2024,5(2):1-10. DOI:10.1038/xxx."
+    }
+  ]
+}
+```
+
+- `partial: true` 表示部分同义词请求超时、仅返回可用结果
+- 可能错误：
+  - 400 检索关键词为空
+  - 502 缺少/无效 API Key、OpenAlex 网络或返回错误
+  - 500 其他检索失败
+
+### 4.15 POST /zotero/save
+
+把勾选的文献写入用户个人 Zotero 库（凭据由前端传入，不在服务端存储）。
+
+- 请求：multipart/form-data
+  - api_key: Zotero API Key（须含写权限）
+  - user_id: Zotero 数字 User ID
+  - items: JSON 数组，元素为 /openalex/search 返回的归一化条目
+- 返回：
+
+```json
+{
+  "saved": 2,
+  "failed": 0,
+  "errors": [],
+  "keys": ["ABCD1234", "EFGH5678"]
+}
+```
+
+- 可能错误：
+  - 400 凭据缺失 / User ID 非数字 / items 为空或格式错误 / 超过 50 条
+  - 502 Zotero 鉴权失败 / 用户库不存在 / 写入返回异常 / 网络错误
+  - 500 其他写入失败

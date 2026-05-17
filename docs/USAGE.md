@@ -55,7 +55,7 @@ pip install pypdf pymupdf rapidocr_onnxruntime
 ## 3. 启动服务
 
 ```bash
-python main.py
+python run.py
 ```
 
 默认地址：http://127.0.0.1:8000
@@ -63,7 +63,7 @@ python main.py
 开发模式：
 
 ```bash
-uvicorn main:app --reload
+uvicorn app.main:app --reload
 ```
 
 ## 4. Web UI 使用流程

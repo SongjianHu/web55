@@ -18,16 +18,26 @@
 
 ```
 .
-├── main.py              # FastAPI 路由与业务编排
-├── llm_parser.py        # LLM 解析与长文本蒸馏
-├── docx_formatter.py    # python-docx 执行层
-├── schemas.py           # Pydantic 数据结构
-├── defaults.py          # 默认排版规则库
-├── numbering.py         # 图/表/公式编号与交叉引用
-├── auto_caption.py      # CLI 工具：自动插入题注
+├── app/                 # 业务代码包
+│   ├── __init__.py      # 包入口，启动时加载 .env
+│   ├── main.py          # FastAPI 路由与业务编排
+│   ├── llm_parser.py    # LLM 解析与长文本蒸馏
+│   ├── docx_formatter.py# python-docx 执行层
+│   ├── schemas.py       # Pydantic 数据结构
+│   ├── defaults.py      # 默认排版规则库
+│   ├── extract.py       # PDF/文档文本提取
+│   ├── knowledge_base.py# 国标知识库入库与检索
+│   ├── qa.py            # 问答模式
+│   ├── checker.py       # 论文格式检查
+│   ├── openalex_search.py # OpenAlex 文献检索
+│   └── zotero_save.py   # 存入 Zotero
 ├── static/index.html    # 前端单页应用
+├── knowledge/           # 国标 PDF 知识库
+├── docs/                # 文档
+├── run.py               # 开发启动入口
 ├── requirements.txt
-└── sessions/            # 运行时输出目录（自动创建）
+├── pyproject.toml       # 项目元数据与工具配置
+└── sessions/            # 运行时输出目录（自动创建，已 gitignore）
 ```
 
 运行时目录结构：
@@ -47,13 +57,16 @@ sessions/
 
 ## 3. 后端模块职责
 
-- main.py：路由、会话管理、历史快照、批量处理、需求文档解析（PDF/DOCX/TXT）
-- llm_parser.py：LLM 解析与长文本蒸馏（两阶段管线）
-- docx_formatter.py：排版执行引擎（样式修改、表格、页眉页脚、题注、目录等）
-- defaults.py：默认排版规则与全局排序，支持占位符替换
-- schemas.py：operations 数据结构与校验
-- numbering.py：图/表/公式编号与交叉引用
-- auto_caption.py：离线题注插入 CLI 工具
+- app/main.py：路由、会话管理、历史快照、批量处理、需求文档解析（PDF/DOCX/TXT）
+- app/llm_parser.py：LLM 解析与长文本蒸馏（两阶段管线）
+- app/docx_formatter.py：排版执行引擎（样式修改、表格、页眉页脚、题注、目录等）
+- app/defaults.py：默认排版规则与全局排序，支持占位符替换
+- app/schemas.py：operations 数据结构与校验
+- app/extract.py：PDF/DOCX/TXT 文本提取（含 OCR 兜底）
+- app/knowledge_base.py：国标 PDF 知识库入库与检索
+- app/qa.py：问答模式（结合知识库）
+- app/checker.py：论文格式检查与批注
+- app/openalex_search.py / app/zotero_save.py：文献检索与存入 Zotero
 - static/index.html：前端单页应用
 
 ## 4. LLM 解析逻辑
@@ -170,7 +183,7 @@ apply_operations() 按传入顺序执行 operations；顺序由以下两处保�
 
 ### 9.4 扩展文本解析类型
 
-- main.py 中新增 _extract_xxx()
+- app/main.py 中新增 _extract_xxx()
 - /extract_text 中添加对应分支
 
 ## 10. 部署与运维注意事项

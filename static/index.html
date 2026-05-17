@@ -1054,6 +1054,28 @@ body {
   border: 1px solid var(--bdr-1); border-radius: 10px;
   padding: 14px; margin-bottom: 10px;
 }
+.zo-item {
+  border: 1px solid var(--bdr-1); border-radius: 8px; padding: 8px 10px;
+  font-size: 12px; line-height: 1.5; background: var(--bg-1,#fafafa);
+}
+.zo-item .zo-pick {
+  font-size: 11px; color: var(--accent); float: right;
+  cursor: pointer; user-select: none;
+}
+.zo-item .zo-title { font-weight: 700; color: var(--text-1); margin: 2px 0; }
+.zo-item .zo-meta  { color: var(--text-3); font-size: 11px; }
+.zo-item .zo-cite {
+  margin-top: 5px; color: var(--text-2,#444); white-space: pre-wrap;
+  font-family: ui-monospace, monospace; font-size: 11px;
+  background: var(--bg-2,#fff); border: 1px dashed var(--bdr-1);
+  border-radius: 6px; padding: 6px;
+}
+.zo-item .zo-copy {
+  margin-top: 6px; font-size: 11px; padding: 3px 8px;
+  border: 1px solid var(--bdr-1); border-radius: 6px;
+  background: var(--bg-2,#fff); cursor: pointer; color: var(--text-2,#444);
+}
+.zo-item .zo-copy:hover { border-color: var(--accent); color: var(--accent); }
 </style>
 </head>
 <body>
@@ -1256,6 +1278,79 @@ body {
         <div style="font-size:11px;color:var(--text-3);margin:-4px 0 8px;">
           基于 GB/T 7714 / GB/T 7713 等国标与通用排版规范作答。
         </div>
+
+        <div id="litPanel" style="border:1px solid var(--bdr-1);
+             border-radius:10px; padding:10px; margin-bottom:10px;
+             background:var(--bg-2,#fff);">
+          <div style="font-weight:700; font-size:12px; color:var(--text-1);
+                      margin-bottom:2px;">🔎 文献检索（OpenAlex）</div>
+          <div style="font-size:11px; color:var(--text-3); margin-bottom:6px;">
+            自动扩展英文同义词检索，默认近三年。可复制 GB/T 7714 著录、勾选「带入提问」，或选中后「存入 Zotero」。
+          </div>
+          <div style="display:flex; gap:6px; flex-wrap:wrap;">
+            <input id="litQuery" type="text" placeholder="关键词（中/英均可），如：深度学习"
+              style="flex:1; min-width:160px; padding:7px 9px;
+                     border:1px solid var(--bdr-1); border-radius:8px; font:inherit;">
+            <input id="litFrom" type="number" min="1900" max="2100" title="起始年"
+              style="width:74px; padding:7px 6px; border:1px solid var(--bdr-1);
+                     border-radius:8px; font:inherit;">
+            <span style="align-self:center; color:var(--text-3);">–</span>
+            <input id="litTo" type="number" min="1900" max="2100" title="结束年"
+              style="width:74px; padding:7px 6px; border:1px solid var(--bdr-1);
+                     border-radius:8px; font:inherit;">
+            <button class="btn" id="litSearchBtn"
+                    style="white-space:nowrap;">搜索</button>
+          </div>
+
+          <details id="oaKeyBox" style="margin-top:6px;">
+            <summary style="font-size:11px; color:var(--text-3); cursor:pointer;">
+              ⚙️ OpenAlex API Key（必填，免费；仅存本机浏览器）</summary>
+            <div style="display:flex; gap:6px; margin-top:6px;">
+              <input id="oaKey" type="password" placeholder="OpenAlex API Key"
+                style="flex:1; padding:6px 8px; border:1px solid var(--bdr-1);
+                       border-radius:8px; font:inherit;">
+            </div>
+            <div style="font-size:11px; color:var(--text-3); margin-top:4px;">
+              OpenAlex 现需免费 Key，在
+              <a href="https://openalex.org/settings/api" target="_blank"
+                 rel="noopener" style="color:var(--accent);">openalex.org/settings/api</a>
+              注册获取后填入这里。
+            </div>
+          </details>
+
+          <div id="litStatus" style="font-size:11px; color:var(--text-3);
+               margin-top:6px;"></div>
+          <div id="litResults" style="margin-top:8px; max-height:260px;
+               overflow:auto; display:flex; flex-direction:column;
+               gap:6px;"></div>
+
+          <details style="margin-top:8px;">
+            <summary style="font-size:11px; color:var(--text-3); cursor:pointer;">
+              ⚙️ Zotero 账号（用于「存入 Zotero」，仅存本机浏览器）</summary>
+            <div style="display:flex; gap:6px; margin-top:6px; flex-wrap:wrap;">
+              <input id="zoKey" type="password" placeholder="Zotero API Key"
+                style="flex:1; min-width:150px; padding:6px 8px;
+                       border:1px solid var(--bdr-1); border-radius:8px; font:inherit;">
+              <input id="zoUid" type="text" placeholder="Zotero User ID（数字）"
+                style="flex:1; min-width:150px; padding:6px 8px;
+                       border:1px solid var(--bdr-1); border-radius:8px; font:inherit;">
+            </div>
+            <div style="font-size:11px; color:var(--text-3); margin-top:4px;">
+              在 zotero.org/settings/keys 创建带写权限的 Key；User ID 见该页顶部。
+            </div>
+          </details>
+
+          <div style="display:flex; align-items:center; gap:8px; margin-top:8px;
+                      flex-wrap:wrap;">
+            <button class="btn" id="litExportBtn" disabled
+                    style="white-space:nowrap;">导出 GB/T 7714（0）</button>
+            <button class="btn" id="zoSaveBtn" disabled
+                    style="white-space:nowrap;">存入 Zotero（0）</button>
+            <div id="litSelectedBar" style="font-size:11px;
+                 color:var(--accent); flex-basis:100%;"></div>
+          </div>
+        </div>
+
         <div id="qaThread" style="flex:1; min-height:120px;"></div>
         <textarea id="qaInput" rows="2"
           placeholder="例：参考文献里的学位论文该怎么著录？前置部分页码用什么数字？"
@@ -2211,6 +2306,7 @@ function setMode(mode) {
   $('formatPane').hidden = mode !== 'format';
   $('checkPane').hidden  = mode !== 'check';
   $('qaPane').hidden     = mode !== 'qa';
+  if (mode === 'qa') initLit();
 }
 
 document.querySelectorAll('#modeSwitch button').forEach(b =>
@@ -2292,20 +2388,25 @@ function addQaBubble(role, text) {
 
 async function askQa() {
   const q = $('qaInput').value.trim();
-  if (!q) return;
+  const refs = [...litSelected.values()].map(it => it.citation).filter(Boolean);
+  if (!q && !refs.length) return;
   const btn = $('qaSendBtn');
   $('qaInput').value = '';
-  addQaBubble('user', q);
+  const userText = q
+    ? (refs.length ? `${q}\n（附带 ${refs.length} 篇检索文献）` : q)
+    : `请按 GB/T 7714—2015 规范以下 ${refs.length} 篇检索文献的著录格式`;
+  addQaBubble('user', userText);
   btn.disabled = true; btn.textContent = '思考中…';
   try {
     const fd = new FormData();
     fd.append('question', q);
     fd.append('history', JSON.stringify(qaHistory.slice(-6)));
+    if (refs.length) fd.append('references', JSON.stringify(refs));
     const r = await fetch('/qa', { method: 'POST', body: fd });
-    if (!r.ok) throw new Error(await r.text());
+    if (!r.ok) throw new Error(await errText(r));
     const data = await r.json();
     addQaBubble('bot', data.answer);
-    qaHistory.push({ role: 'user', content: q });
+    qaHistory.push({ role: 'user', content: userText });
     qaHistory.push({ role: 'assistant', content: data.answer });
   } catch (err) {
     addQaBubble('bot', '出错了：' + err.message);
@@ -2317,6 +2418,171 @@ $('qaSendBtn').addEventListener('click', askQa);
 $('qaInput').addEventListener('keydown', (e) => {
   if (e.key === 'Enter' && (e.ctrlKey || e.metaKey)) askQa();
 });
+
+/* ===== 问答模式 · OpenAlex 文献检索 + 存入 Zotero ===== */
+const litSelected = new Map();   // id -> 归一化条目（含 citation）
+let litLastResults = [];         // 最近一次检索的全部结果
+let litReady = false;
+
+async function errText(r) {
+  const t = await r.text();
+  try { return JSON.parse(t).detail || t; } catch { return t; }
+}
+
+async function initLit() {
+  $('zoKey').value = localStorage.getItem('zoKey') || '';
+  $('zoUid').value = localStorage.getItem('zoUid') || '';
+  $('oaKey').value = localStorage.getItem('oaKey') || '';
+  if (!$('oaKey').value) $('oaKeyBox').open = true;   // 没填过则展开提示
+  if (litReady) return;
+  litReady = true;
+  try {
+    const r = await fetch('/openalex/defaults');
+    const d = await r.json();
+    if (!$('litFrom').value) $('litFrom').value = d.from_year;
+    if (!$('litTo').value)   $('litTo').value   = d.to_year;
+  } catch { /* 失败则留空，后端默认近三年 */ }
+}
+['zoKey', 'zoUid', 'oaKey'].forEach(id =>
+  $(id).addEventListener('input', () =>
+    localStorage.setItem(id, $(id).value.trim())));
+
+function renderLitBar() {
+  const n = litSelected.size;
+  const exportN = n || litLastResults.length;   // 有勾选导出勾选，否则导出全部结果
+  const save = $('zoSaveBtn');
+  save.textContent = `存入 Zotero（${n}）`;
+  save.disabled = n === 0;
+  const exp = $('litExportBtn');
+  exp.textContent = `导出 GB/T 7714（${exportN}）`;
+  exp.disabled = exportN === 0;
+  $('litSelectedBar').textContent = n
+    ? `已选 ${n} 篇：可导出/存入 Zotero，或直接提问让助手据此生成/校对参考文献`
+    : (litLastResults.length
+        ? '未勾选时「导出 GB/T 7714」将导出全部检索结果' : '');
+}
+
+function exportGbt() {
+  const items = litSelected.size
+    ? [...litSelected.values()] : litLastResults;
+  if (!items.length) return;
+  const text = items
+    .map((it, i) => `[${i + 1}] ${it.citation}`).join('\r\n');
+  const blob = new Blob([text], { type: 'text/plain;charset=utf-8' });
+  const a = document.createElement('a');
+  a.href = URL.createObjectURL(blob);
+  a.download = 'references-gbt7714.txt';
+  a.click();
+  URL.revokeObjectURL(a.href);
+}
+$('litExportBtn').addEventListener('click', exportGbt);
+
+function litCard(it) {
+  const div = document.createElement('div');
+  div.className = 'zo-item';
+  const checked = litSelected.has(it.id) ? 'checked' : '';
+  const meta = [it.authors, it.year, it.publication,
+    it.cited_by ? `被引 ${it.cited_by}` : ''].filter(Boolean).join(' · ');
+  div.innerHTML =
+    `<label class="zo-pick"><input type="checkbox" ${checked}> 选择</label>` +
+    `<div class="zo-title">${escapeHtml(it.title)}</div>` +
+    `<div class="zo-meta">${escapeHtml(meta)}</div>` +
+    `<div class="zo-cite">${escapeHtml(it.citation)}</div>` +
+    `<button class="zo-copy">复制著录</button>`;
+  div.querySelector('input').addEventListener('change', (e) => {
+    if (e.target.checked) litSelected.set(it.id, it);
+    else litSelected.delete(it.id);
+    renderLitBar();
+  });
+  div.querySelector('.zo-copy').addEventListener('click', async (e) => {
+    try {
+      await navigator.clipboard.writeText(it.citation);
+      e.target.textContent = '已复制';
+    } catch { e.target.textContent = '复制失败'; }
+    setTimeout(() => { e.target.textContent = '复制著录'; }, 1500);
+  });
+  return div;
+}
+
+async function searchLit() {
+  const q = $('litQuery').value.trim();
+  if (!q) return;
+  const btn = $('litSearchBtn');
+  const st = $('litStatus');
+  btn.disabled = true; btn.textContent = '搜索中…';
+  st.textContent = '';
+  $('litResults').innerHTML = '';
+  litLastResults = [];
+  renderLitBar();
+  try {
+    const fd = new FormData();
+    fd.append('query', q);
+    if ($('litFrom').value) fd.append('from_year', $('litFrom').value);
+    if ($('litTo').value)   fd.append('to_year', $('litTo').value);
+    if ($('oaKey').value.trim()) fd.append('api_key', $('oaKey').value.trim());
+    fd.append('limit', '20');
+    const r = await fetch('/openalex/search', { method: 'POST', body: fd });
+    if (!r.ok) throw new Error(await errText(r));
+    const data = await r.json();
+    if (!data.items.length) {
+      st.textContent = '未检索到匹配文献（可放宽年份范围）'; return;
+    }
+    const yr = data.year_range
+      ? `${data.year_range[0]}–${data.year_range[1]}` : '';
+    st.textContent =
+      `共 ${data.count} 条 · ${yr} · 同义词：${(data.terms || []).join(' / ')}`
+      + (data.partial ? '（部分同义词请求超时，已返回可用结果）' : '');
+    const frag = document.createDocumentFragment();
+    data.items.forEach(it => frag.appendChild(litCard(it)));
+    $('litResults').appendChild(frag);
+    litLastResults = data.items;
+    renderLitBar();
+  } catch (err) {
+    st.textContent = '检索失败：' + err.message;
+  } finally {
+    btn.disabled = false; btn.textContent = '搜索';
+  }
+}
+$('litSearchBtn').addEventListener('click', searchLit);
+$('litQuery').addEventListener('keydown', (e) => {
+  if (e.key === 'Enter') { e.preventDefault(); searchLit(); }
+});
+
+async function saveToZotero() {
+  const items = [...litSelected.values()];
+  if (!items.length) return;
+  const key = $('zoKey').value.trim();
+  const uid = $('zoUid').value.trim();
+  const st = $('litStatus');
+  if (!key || !uid) {
+    st.textContent = '请先在「⚙️ Zotero 账号」里填写 API Key 与 User ID';
+    return;
+  }
+  const btn = $('zoSaveBtn');
+  btn.disabled = true; btn.textContent = '保存中…';
+  try {
+    const fd = new FormData();
+    fd.append('api_key', key);
+    fd.append('user_id', uid);
+    fd.append('items', JSON.stringify(items));
+    const r = await fetch('/zotero/save', { method: 'POST', body: fd });
+    if (!r.ok) throw new Error(await errText(r));
+    const d = await r.json();
+    let msg = `已存入 Zotero ${d.saved} 篇`;
+    if (d.failed) msg += `，失败 ${d.failed} 篇（${(d.errors || []).join('；')}）`;
+    st.textContent = msg;
+    if (d.saved && !d.failed) {
+      litSelected.clear();
+      document.querySelectorAll('#litResults input[type=checkbox]')
+        .forEach(c => { c.checked = false; });
+    }
+  } catch (err) {
+    st.textContent = '存入 Zotero 失败：' + err.message;
+  } finally {
+    renderLitBar();
+  }
+}
+$('zoSaveBtn').addEventListener('click', saveToZotero);
 </script>
 </body>
 </html>
