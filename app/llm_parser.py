@@ -96,7 +96,7 @@ explanation 直接向用户提问，例如：
 
 ---
 
-## create_style 字段（强烈推荐用于首次格式化）
+## create_style 字段（用于首次格式化）
 
 **作用：** 创建/更新命名样式并将目标段落切换为该样式，便于后续直接按样式名修改。
 
@@ -251,6 +251,9 @@ display_text 作为 Word 更新域之前的缓存显示文字（如 "图1-1"）�
 4. 一条用户消息可能包含多个操作，全部放进 operations 数组
 5. 用户说"标题"没指定级别 → 用 "all_headings"
 6. 用户说"全部"/"整篇" → 用 "all"
+7. 输出必须是单行严格合法 JSON。字符串值内若要引用样式名/节名/章节名，
+   一律用中文引号「」（如 创建「摘要正文」样式），**禁止**在 explanation 等字符串里
+   直接写未转义的英文双引号 "；确需英文双引号时必须写成 \\"。
 
 ## operations 排列顺序（多条要求时务必遵守）
 当用户给出多条排版要求（如编号清单）时，operations 数组按以下顺序生成，**绝不打乱**：
@@ -292,7 +295,7 @@ H1: 第一章 绪论
 H1: 参考文献
 ]
 摘要改成宋体四号
-输出：{"operations":[{"type":"format","target":"section:摘要","create_style":"摘要正文","properties":{"font_name":"宋体","font_size":14}}],"explanation":"已将摘要节正文设为宋体四号，并创建"摘要正文"样式"}
+输出：{"operations":[{"type":"format","target":"section:摘要","create_style":"摘要正文","properties":{"font_name":"宋体","font_size":14}}],"explanation":"已将摘要节正文设为宋体四号，并创建「摘要正文」样式"}
 
 用户：[文档样式："Normal"、"Heading 1"、"摘要正文"]
 [文档大纲：
@@ -308,7 +311,7 @@ H1: 前言
 H1: 第一章 绪论
 ]
 前言那一节改成宋体小四
-输出：{"operations":[{"type":"format","target":"section:前言","create_style":"前言正文","properties":{"font_name":"宋体","font_size":12}}],"explanation":"已将前言节正文设为宋体小四，并创建"前言正文"样式"}
+输出：{"operations":[{"type":"format","target":"section:前言","create_style":"前言正文","properties":{"font_name":"宋体","font_size":12}}],"explanation":"已将前言节正文设为宋体小四，并创建「前言正文」样式"}
 
 用户：[文档样式："Normal"、"Heading 1"、"Heading 2"]
 [文档大纲：
@@ -316,7 +319,7 @@ H1: 摘要
 H1: 第一章 绪论
 ]
 把"摘要"这个标题本身改成黑体三号居中
-输出：{"operations":[{"type":"format","target":"heading:摘要","properties":{"font_name":"黑体","font_size":16,"alignment":"center"}}],"explanation":"已将"摘要"标题段落设为黑体三号居中"}
+输出：{"operations":[{"type":"format","target":"heading:摘要","properties":{"font_name":"黑体","font_size":16,"alignment":"center"}}],"explanation":"已将「摘要」标题段落设为黑体三号居中"}
 
 用户：[文档样式："Normal"、"Heading 1"、"Heading 2"]
 [文档大纲：
@@ -324,7 +327,7 @@ H1: 第一章 绪论
   H2: 1.1 研究背景
 ]
 第一章正文改成宋体小四，建立样式
-输出：{"operations":[{"type":"format","target":"section:第一章 绪论","create_style":"章节正文","properties":{"font_name":"宋体","font_size":12}}],"explanation":"已将第一章正文设为宋体小四，并创建"章节正文"样式"}
+输出：{"operations":[{"type":"format","target":"section:第一章 绪论","create_style":"章节正文","properties":{"font_name":"宋体","font_size":12}}],"explanation":"已将第一章正文设为宋体小四，并创建「章节正文」样式"}
 
 用户：[文档样式："Normal"、"Heading 1"、"Heading 2"、"参考文献条目"]
 [文档大纲：
@@ -338,7 +341,7 @@ H1: 参考文献
 H1: 参考文献
 ]
 参考文献那一节改成五号宋体
-输出：{"operations":[{"type":"format","target":"section:参考文献","create_style":"参考文献条目","properties":{"font_name":"宋体","font_size":10.5}}],"explanation":"已将参考文献节设为五号宋体，并创建"参考文献条目"样式"}
+输出：{"operations":[{"type":"format","target":"section:参考文献","create_style":"参考文献条目","properties":{"font_name":"宋体","font_size":10.5}}],"explanation":"已将参考文献节设为五号宋体，并创建「参考文献条目」样式"}
 
 用户：正文中文用宋体，英文和数字用 Times New Roman
 输出：{"operations":[{"type":"format","target":"Normal","properties":{"font_name":"宋体","font_name_ascii":"Times New Roman"}}],"explanation":"已将正文中文设为宋体，英文和数字设为Times New Roman"}
@@ -728,6 +731,74 @@ def _extract_json(text: str) -> str:
     return text
 
 
+def _repair_json(s: str) -> str:
+    """修复 LLM 常见错误：字符串值内未转义的英文双引号。
+
+    采用状态机扫描：处于字符串内时，遇到 `"` 先向后看下一个非空白字符，
+    若是 ,:}]  或文本结束 → 视为字符串结束的真引号；否则视为内部引号 → 转义为 \\"。
+    这能修复诸如 ...创建"摘要正文"样式"} 这类 LLM 高频产出的非法 JSON。
+    """
+    out = []
+    in_str = False
+    i = 0
+    n = len(s)
+    while i < n:
+        c = s[i]
+        if not in_str:
+            out.append(c)
+            if c == '"':
+                in_str = True
+            i += 1
+            continue
+        if c == "\\" and i + 1 < n:
+            out.append(c)
+            out.append(s[i + 1])
+            i += 2
+            continue
+        if c == '"':
+            j = i + 1
+            while j < n and s[j] in " \t\r\n":
+                j += 1
+            nxt = s[j] if j < n else ""
+            if nxt in ",:}]" or nxt == "":
+                out.append(c)            # 真正的字符串结束引号
+                in_str = False
+            else:
+                out.append('\\"')        # 内部未转义引号 → 转义
+            i += 1
+            continue
+        out.append(c)
+        i += 1
+    return "".join(out)
+
+
+def _loads_lenient(payload: str):
+    """先严格解析；失败则尝试修复未转义引号后再解析。"""
+    try:
+        return json.loads(payload)
+    except json.JSONDecodeError:
+        return json.loads(_repair_json(payload))
+
+
+def _retry_fix_json(client, model: str, bad_text: str, err: str):
+    """最后兜底：让模型把不合法文本修正为严格合法 JSON（仅一次）。"""
+    resp = client.messages.create(
+        model=model,
+        max_tokens=4096,
+        system=(
+            "你将收到一段本应是 JSON 但语法不合法的文本。"
+            "只输出修正后的严格合法 JSON（保持数据不变，仅修复语法："
+            "转义字符串内的英文双引号、补齐缺失的分隔符等）。"
+            "不要任何解释、不要 Markdown 代码块。"
+        ),
+        messages=[{"role": "user", "content": f"错误：{err}\n\n原文：\n{bad_text}"}],
+    )
+    tb = next((b for b in resp.content if hasattr(b, "text")), None)
+    if tb is None:
+        raise ValueError("LLM 修复 JSON 时未返回文本")
+    return json.loads(_extract_json(tb.text))
+
+
 def distill_requirements(long_text: str, model: str = "claude-sonnet-4-5") -> str:
     """第一阶段：从长文本中提取排版要求清单（自然语言编号列表）。"""
     client = _get_client()
@@ -748,11 +819,42 @@ def _count_requirement_lines(distilled: str) -> int:
     return sum(1 for ln in distilled.splitlines() if re.match(r"^\s*\d+[\.\、]", ln))
 
 
+def _sanitize_history(history) -> list:
+    """把前端传入的多轮历史规整为合法的 user/assistant 交替序列。
+
+    - 仅保留 role ∈ {user, assistant} 且 content 非空的条目
+    - 去掉开头的 assistant（Anthropic 要求 messages 以 user 起）
+    - 合并相邻同角色，保证严格 user/assistant 交替
+    - 每条内容截断到 4000 字，避免历史撑爆上下文
+    """
+    cleaned = []
+    for h in history or []:
+        if not isinstance(h, dict):
+            continue
+        role = h.get("role")
+        content = h.get("content")
+        if role not in ("user", "assistant"):
+            continue
+        if not isinstance(content, str) or not content.strip():
+            continue
+        cleaned.append({"role": role, "content": content[:4000]})
+    while cleaned and cleaned[0]["role"] != "user":
+        cleaned.pop(0)
+    merged = []
+    for m in cleaned:
+        if merged and merged[-1]["role"] == m["role"]:
+            merged[-1]["content"] += "\n" + m["content"]
+        else:
+            merged.append(dict(m))
+    return merged
+
+
 def parse_command(
     user_message: str,
     available_styles: list = None,
     doc_structure: list = None,
     doc_title: str = "",
+    history: list = None,
     model: str = "claude-sonnet-4-5",
 ) -> ParsedCommand:
     """调用 LLM 解析用户消息，返回结构化指令。失败会抛异常。
@@ -764,6 +866,8 @@ def parse_command(
     available_styles: 文档中实际使用的段落样式名列表。
     doc_structure:    文档大纲，list of {level: int, text: str}，来自 get_document_structure()。
     doc_title:        从文档内容推断出的"论文题目"实际文字（用于解析"页眉=论文题目"等元引用）。
+    history:          多轮对话历史 [{role, content}, ...]。澄清式追问（先问学校/学历，
+                      用户补充后再生成 thesis_sections）必须依赖它，否则模型看不到上一轮。
     """
     client = _get_client()
 
@@ -797,13 +901,16 @@ def parse_command(
 
     content = ("\n".join(prefix_parts) + "\n\n" + msg_for_planning) if prefix_parts else msg_for_planning
 
+    # 多轮历史在前，本轮 user 在后；澄清→补充→生成的流程靠这个上下文才成立
+    messages = _sanitize_history(history) + [{"role": "user", "content": content}]
+
     text_block = None
     for _attempt in range(2):
         resp = client.messages.create(
             model=model,
             max_tokens=4096,
             system=SYSTEM_PROMPT,
-            messages=[{"role": "user", "content": content}],
+            messages=messages,
         )
         text_block = next((b for b in resp.content if hasattr(b, "text")), None)
         if text_block is not None:
@@ -812,7 +919,11 @@ def parse_command(
         raise ValueError("LLM 返回内容中未找到文本块")
     raw = text_block.text
     payload = _extract_json(raw)
-    data = json.loads(payload)
+    try:
+        data = _loads_lenient(payload)
+    except json.JSONDecodeError as e:
+        # 修复仍失败 → 让模型把它纠正为严格合法 JSON（最后一次兜底）
+        data = _retry_fix_json(client, model, raw, str(e))
     parsed = ParsedCommand.model_validate(data)
 
     if distilled:

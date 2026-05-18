@@ -73,21 +73,27 @@ export default function CheckPane() {
         <h3 className="mb-2.5 text-[13px] font-bold text-ink-heading">
           ② 文献综述（可选，用于引用对应性交叉核对）
         </h3>
-        <label
+        <button
+          type="button"
           onClick={() => reviewRef.current?.click()}
-          className="glass mb-2.5 block cursor-pointer rounded-btn border-[1.5px] border-dashed border-white/60 p-3 text-center text-xs text-ink-faint hover:border-gold hover:text-gold"
+          className="glass mb-2.5 block w-full cursor-pointer rounded-btn border-[1.5px] border-dashed border-white/60 p-3 text-center text-xs text-ink-faint transition-colors hover:border-gold hover:text-gold"
         >
-          <input
-            ref={reviewRef}
-            type="file"
-            accept=".pdf,.docx,.txt"
-            hidden
-            onChange={(e) => setReviewFile(e.target.files[0] || null)}
-          />
           {reviewFile
             ? `已选择：${reviewFile.name}（点击可更换）`
             : '点击选择文献综述文件（.docx / .pdf / .txt）'}
-        </label>
+        </button>
+        <input
+          ref={reviewRef}
+          type="file"
+          accept=".pdf,.docx,.txt"
+          hidden
+          onChange={(e) => {
+            // 先读取 File 存入 state，再清空 input.value：
+            // 否则再次选择同一文件不会触发 change，表现为“偶发上传失败需重选”。
+            setReviewFile(e.target.files[0] || null);
+            e.target.value = '';
+          }}
+        />
         <Button
           variant="primary"
           className="w-full"

@@ -28,7 +28,7 @@ export default function Toolbar({ onOpenBatch }) {
   async function applyThesisTemplate() {
     if (!sessionId) return;
     setThesisBusy(true);
-    const id = addMsg('bot', '正在应用论文模板排版，建立全套命名样式…');
+    const id = addMsg('bot', '正在应用论文默认样式，建立全套命名样式…');
     try {
       const data = await api.applyDefaults(sessionId, ['smart_thesis_format_all']);
       updateMsg(id, {
@@ -74,7 +74,7 @@ export default function Toolbar({ onOpenBatch }) {
         onClick={applyThesisTemplate}
       >
         <Icon name="wand" size={15} />
-        {thesisBusy ? '排版中…' : '一键论文排版'}
+        {thesisBusy ? '应用中…' : '论文默认样式应用'}
       </Button>
       <Button
         variant="ghost"

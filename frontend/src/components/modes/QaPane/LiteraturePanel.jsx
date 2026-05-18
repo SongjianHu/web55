@@ -2,6 +2,8 @@ import { useEffect, useRef, useState } from 'react';
 import { api } from '../../../lib/api.js';
 import { useLocalStorageState } from '../../../lib/useLocalStorageState.js';
 import Button from '../../ui/Button.jsx';
+import Collapsible from '../../ui/Collapsible.jsx';
+import { InfoTip } from '../../ui/Tooltip.jsx';
 
 function LitCard({ it, selected, onToggle }) {
   const [copyText, setCopyText] = useState('复制著录');
@@ -164,13 +166,22 @@ export default function LiteraturePanel({ selected, setSelected }) {
     'rounded-btn border border-white/55 bg-white/50 px-2 py-1.5 text-sm outline-none backdrop-blur-sm focus:border-gold';
 
   return (
-    <div className="glass mb-2.5 rounded-card p-2.5">
-      <div className="mb-0.5 text-xs font-bold text-ink-heading">
-        🔎 文献检索（OpenAlex）
-      </div>
-      <div className="mb-1.5 text-[11px] text-ink-faint">
-        自动扩展英文同义词检索，默认近三年。可复制 GB/T 7714 著录、勾选「带入提问」，或选中后「存入 Zotero」。
-      </div>
+    <Collapsible
+      className="glass mb-2.5 rounded-card"
+      summaryClassName="px-3 py-2.5 text-xs font-bold text-ink-heading hover:bg-white/30"
+      bodyClassName="border-t border-white/40 px-3 pb-3 pt-2"
+      summary={
+        <>
+          🔎 文献检索（OpenAlex）
+          <InfoTip content="自动扩展英文同义词检索，默认近三年。可复制 GB/T 7714 著录、勾选「带入提问」，或选中后「存入 Zotero」。" />
+        </>
+      }
+      right={
+        <span className="ml-auto rounded-full bg-gold/10 px-2 py-0.5 text-[10.5px] font-medium text-gold-deep">
+          {n ? `已选 ${n}` : results.length ? `${results.length} 条` : '展开'}
+        </span>
+      }
+    >
       <div className="flex flex-wrap gap-1.5">
         <input
           value={query}
@@ -219,8 +230,9 @@ export default function LiteraturePanel({ selected, setSelected }) {
         onToggle={(e) => setOaBoxOpen(e.target.open)}
         className="mt-1.5"
       >
-        <summary className="cursor-pointer text-[11px] text-ink-faint">
-          ⚙️ OpenAlex API Key（必填，免费；仅存本机浏览器）
+        <summary className="flex cursor-pointer items-center gap-1 text-[11px] text-ink-faint">
+          ⚙️ OpenAlex API Key
+          <InfoTip content="必填，免费；仅存本机浏览器。在 openalex.org/settings/api 注册获取后填入。" />
         </summary>
         <input
           value={oaKey}
@@ -229,18 +241,14 @@ export default function LiteraturePanel({ selected, setSelected }) {
           placeholder="OpenAlex API Key"
           className={`${inputCls} mt-1.5 w-full`}
         />
-        <div className="mt-1 text-[11px] text-ink-faint">
-          OpenAlex 现需免费 Key，在{' '}
-          <a
-            href="https://openalex.org/settings/api"
-            target="_blank"
-            rel="noopener"
-            className="text-gold"
-          >
-            openalex.org/settings/api
-          </a>{' '}
-          注册获取后填入这里。
-        </div>
+        <a
+          href="https://openalex.org/settings/api"
+          target="_blank"
+          rel="noopener"
+          className="mt-1 inline-block text-[11px] font-medium text-gold hover:text-gold-deep"
+        >
+          获取免费 Key ↗
+        </a>
       </details>
 
       {status && (
@@ -259,8 +267,9 @@ export default function LiteraturePanel({ selected, setSelected }) {
       </div>
 
       <details className="mt-2">
-        <summary className="cursor-pointer text-[11px] text-ink-faint">
-          ⚙️ Zotero 账号（用于「存入 Zotero」，仅存本机浏览器）
+        <summary className="flex cursor-pointer items-center gap-1 text-[11px] text-ink-faint">
+          ⚙️ Zotero 账号
+          <InfoTip content="用于「存入 Zotero」，仅存本机浏览器。在 zotero.org/settings/keys 创建带写权限的 Key；User ID 见该页顶部。" />
         </summary>
         <div className="mt-1.5 flex flex-wrap gap-1.5">
           <input
@@ -278,20 +287,20 @@ export default function LiteraturePanel({ selected, setSelected }) {
             className={`${inputCls} min-w-[150px] flex-1`}
           />
         </div>
-        <div className="mt-1 text-[11px] text-ink-faint">
-          在 zotero.org/settings/keys 创建带写权限的 Key；User ID 见该页顶部。
-        </div>
       </details>
 
       <div className="mt-2 flex flex-wrap items-center gap-2">
-        <Button
-          variant="secondary"
-          size="sm"
-          disabled={exportN === 0}
-          onClick={exportGbt}
-        >
-          导出 GB/T 7714（{exportN}）
-        </Button>
+        <span className="inline-flex items-center gap-1">
+          <Button
+            variant="secondary"
+            size="sm"
+            disabled={exportN === 0}
+            onClick={exportGbt}
+          >
+            导出 GB/T 7714（{exportN}）
+          </Button>
+          <InfoTip content="未勾选时「导出 GB/T 7714」将导出全部检索结果。" />
+        </span>
         <Button
           variant="secondary"
           size="sm"
@@ -300,14 +309,12 @@ export default function LiteraturePanel({ selected, setSelected }) {
         >
           {savingZo ? '保存中…' : `存入 Zotero（${n}）`}
         </Button>
-        <div className="basis-full text-[11px] text-gold">
-          {n
-            ? `已选 ${n} 篇：可导出/存入 Zotero，或直接提问让助手据此生成/校对参考文献`
-            : results.length
-              ? '未勾选时「导出 GB/T 7714」将导出全部检索结果'
-              : ''}
-        </div>
+        {n > 0 && (
+          <div className="basis-full text-[11px] text-gold">
+            已选 {n} 篇：可导出/存入 Zotero，或直接提问让助手据此生成/校对参考文献
+          </div>
+        )}
       </div>
-    </div>
+    </Collapsible>
   );
 }

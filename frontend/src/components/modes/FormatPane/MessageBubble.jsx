@@ -1,4 +1,5 @@
 import { cn } from '../../../lib/cn.js';
+import Markdown from '../../ui/Markdown.jsx';
 
 // 折叠块（蒸馏清单 / 长文本原文）—— 用原生 details，简洁可访问。
 function Disclosure({ summary, body, tone = 'bot' }) {
@@ -57,8 +58,10 @@ export default function MessageBubble({ msg }) {
             <div>📄 已发送 {text.length} 字格式要求</div>
             <Disclosure summary="查看原文" body={text} tone="user" />
           </>
-        ) : (
+        ) : isUser ? (
           <span>{text}</span>
+        ) : (
+          <Markdown>{text}</Markdown>
         )}
 
         {distilled && (

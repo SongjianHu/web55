@@ -3,6 +3,7 @@ import { useSession } from '../../../state/SessionContext.jsx';
 import { api } from '../../../lib/api.js';
 import Collapsible from '../../ui/Collapsible.jsx';
 import Icon from '../../ui/Icon.jsx';
+import { cn } from '../../../lib/cn.js';
 import {
   STRUCTURE_BADGE_CFG,
   STRUCTURE_INDENT,
@@ -13,24 +14,55 @@ import {
 
 const clip = (t) => (t.length > 44 ? t.slice(0, 42) + '…' : t);
 
-function Item({ item }) {
+// 二级及更深标题归为章节的子节点，默认折叠（与一键论文默认样式应用的章节识别一致）
+const CHILD_TYPES = new Set([
+  'heading_2',
+  'heading_3',
+  'heading_4',
+  'heading_5',
+  'heading_6',
+]);
+
+// 把扁平有序列表组装成「章节(顶层) → 二级+子标题」的两层结构
+function buildTree(items) {
+  const nodes = [];
+  let cur = null;
+  for (const it of items) {
+    if (CHILD_TYPES.has(it.type)) {
+      if (cur) cur.children.push(it);
+      else nodes.push({ item: it, children: [] }); // 无父章节的孤立子标题：独立显示
+    } else {
+      cur = { item: it, children: [] };
+      nodes.push(cur);
+    }
+  }
+  return nodes;
+}
+
+function Badge({ item }) {
   const cfg = STRUCTURE_BADGE_CFG[item.type] || {
     label: item.label,
     color: '#64748b',
     bg: 'rgba(100,116,139,0.10)',
   };
+  return (
+    <span
+      className="flex-shrink-0 rounded-[3px] px-1.5 py-px text-[10px] font-semibold"
+      style={{ color: cfg.color, background: cfg.bg, minWidth: 28, textAlign: 'center' }}
+    >
+      {cfg.label}
+    </span>
+  );
+}
+
+function Item({ item }) {
   const indent = STRUCTURE_INDENT[item.type] || 0;
   return (
     <div
       className="flex items-baseline gap-1.5 rounded-btn py-[3px] pr-1 leading-normal hover:bg-gray-50"
       style={{ paddingLeft: 4 + indent }}
     >
-      <span
-        className="flex-shrink-0 rounded-[3px] px-1.5 py-px text-[10px] font-semibold"
-        style={{ color: cfg.color, background: cfg.bg, minWidth: 28, textAlign: 'center' }}
-      >
-        {cfg.label}
-      </span>
+      <Badge item={item} />
       <span className="flex-1 overflow-hidden text-ellipsis whitespace-nowrap text-[11.5px] text-ink-body">
         {clip(item.text)}
       </span>
@@ -38,15 +70,58 @@ function Item({ item }) {
   );
 }
 
+function ChapterNode({ node, nodeKey, openCh, toggle }) {
+  if (node.children.length === 0) return <Item item={node.item} />;
+  const isOpen = openCh.has(nodeKey);
+  return (
+    <div>
+      <button
+        type="button"
+        onClick={() => toggle(nodeKey)}
+        className="flex w-full items-baseline gap-1 rounded-btn py-[3px] pl-1 pr-1 text-left hover:bg-gray-50"
+      >
+        <span
+          className={cn(
+            'w-2.5 flex-shrink-0 text-[9px] text-ink-faint transition-transform',
+            isOpen && 'rotate-90',
+          )}
+        >
+          ▸
+        </span>
+        <Badge item={node.item} />
+        <span className="flex-1 overflow-hidden text-ellipsis whitespace-nowrap text-[11.5px] text-ink-body">
+          {clip(node.item.text)}
+        </span>
+        {!isOpen && (
+          <span className="flex-shrink-0 rounded-full bg-gray-100 px-1.5 text-[10px] text-ink-faint">
+            {node.children.length} 节
+          </span>
+        )}
+      </button>
+      {isOpen &&
+        node.children.map((c, i) => <Item key={i} item={c} />)}
+    </div>
+  );
+}
+
 export default function StructurePanel() {
   const { sessionId, structureSignal, structureAutoOpen } = useSession();
   const [open, setOpen] = useState(false);
+  const [openCh, setOpenCh] = useState(new Set());
   const [state, setState] = useState({ status: 'idle', data: null, error: '' });
+
+  const toggle = (key) =>
+    setOpenCh((s) => {
+      const n = new Set(s);
+      n.has(key) ? n.delete(key) : n.add(key);
+      return n;
+    });
 
   useEffect(() => {
     if (!sessionId) return;
     let cancelled = false;
     setState({ status: 'loading', data: null, error: '' });
+    setOpenCh(new Set()); // 新数据：章节默认全部折叠
     if (structureAutoOpen) setOpen(true);
     api
       .structure(sessionId)
@@ -122,15 +197,29 @@ export default function StructurePanel() {
                     >
                       {meta.zh}
                     </div>
-                    {sections[k].map((it, i) => (
-                      <Item key={i} item={it} />
+                    {buildTree(sections[k]).map((node, i) => (
+                      <ChapterNode
+                        key={i}
+                        node={node}
+                        nodeKey={`${k}:${i}`}
+                        openCh={openCh}
+                        toggle={toggle}
+                      />
                     ))}
                   </div>
                 );
               })
-            : (data.items || [])
-                .filter((x) => !INLINE_TYPES.has(x.type))
-                .map((it, i) => <Item key={i} item={it} />)}
+            : buildTree(
+                (data.items || []).filter((x) => !INLINE_TYPES.has(x.type)),
+              ).map((node, i) => (
+                <ChapterNode
+                  key={i}
+                  node={node}
+                  nodeKey={`flat:${i}`}
+                  openCh={openCh}
+                  toggle={toggle}
+                />
+              ))}
 
           {statParts.length > 0 && (
             <div className="mt-2 flex flex-wrap gap-1.5 border-t border-dashed border-line pt-2">

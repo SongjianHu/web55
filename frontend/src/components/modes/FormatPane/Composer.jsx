@@ -1,4 +1,10 @@
-import { useRef, useState, useCallback, useLayoutEffect } from 'react';
+import {
+  useRef,
+  useState,
+  useCallback,
+  useLayoutEffect,
+  useEffect,
+} from 'react';
 import { useSession } from '../../../state/SessionContext.jsx';
 import { api } from '../../../lib/api.js';
 import { useAutosize } from '../../../lib/useAutosize.js';
@@ -29,6 +35,12 @@ export default function Composer() {
   const reqFileRef = useRef(null);
   const pendingCaret = useRef(null);
   const hintTimer = useRef(null);
+  // 排版对话多轮历史（澄清式追问依赖它）；换文档/重新上传时清空
+  const convoRef = useRef([]);
+
+  useEffect(() => {
+    convoRef.current = [];
+  }, [sessionId]);
 
   useAutosize(textRef, input, 320);
 
@@ -81,12 +93,22 @@ export default function Composer() {
     setSending(true);
     const thinkId = addMsg('bot', '思考中…');
     try {
-      const data = await api.chat(sessionId, message);
+      const data = await api.chat(
+        sessionId,
+        message,
+        convoRef.current.slice(-6),
+      );
+      const reply = data.explanation || '已完成修改';
       updateMsg(thinkId, {
-        text: data.explanation || '已完成修改',
+        text: reply,
         distilled: data.distilled || undefined,
         ops: data.operations && data.operations.length ? data.operations : undefined,
       });
+      // 记录本轮（含澄清问答），下一轮带上下文，模型才能"接上一轮"继续
+      convoRef.current.push(
+        { role: 'user', content: message },
+        { role: 'assistant', content: reply },
+      );
       if (data.history_count != null) setHistoryCount(data.history_count);
       bumpPreview();
       bumpStructure();

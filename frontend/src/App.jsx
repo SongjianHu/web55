@@ -20,8 +20,13 @@ export default function App() {
       <div className="px-3.5">
         <ModeSwitch />
       </div>
-      <UploadZone />
-      <Toolbar onOpenBatch={() => setBatchOpen(true)} />
+      {/* 上传/下载/论文默认样式应用/撤销/批量为排版模式专属，检查与问答模式下隐藏以保持简洁 */}
+      {mode === 'format' && (
+        <>
+          <UploadZone />
+          <Toolbar onOpenBatch={() => setBatchOpen(true)} />
+        </>
+      )}
       <div className="flex min-h-0 flex-1 flex-col px-0 pb-0">
         {mode === 'format' && <FormatPane />}
         {mode === 'check' && (

@@ -115,11 +115,23 @@ async def upload_doc(file: UploadFile = File(...)):
 
 
 @app.post("/chat")
-async def chat(session_id: str = Form(...), message: str = Form(...)):
+async def chat(
+    session_id: str = Form(...),
+    message: str = Form(...),
+    history: str = Form("[]"),
+):
     session_dir = WORK_DIR / session_id
     doc_path = session_dir / "current.docx"
     if not doc_path.exists():
         raise HTTPException(404, "会话不存在或文档已丢失，请先上传 docx")
+
+    # 多轮历史（澄清式追问依赖它：先问学校/学历，用户补充后才能生成 thesis_sections）
+    try:
+        hist = _json.loads(history) if history else []
+        if not isinstance(hist, list):
+            hist = []
+    except (ValueError, _json.JSONDecodeError):
+        hist = []
 
     # 1. 提取文档样式 + 大纲 + 推断的论文题目，作为 LLM 上下文
     try:
@@ -136,7 +148,8 @@ async def chat(session_id: str = Form(...), message: str = Form(...)):
         parsed = parse_command(message,
                                available_styles=available_styles,
                                doc_structure=doc_structure,
-                               doc_title=doc_title)
+                               doc_title=doc_title,
+                               history=hist)
     except Exception as e:
         raise HTTPException(500, f"指令解析失败：{e}")
 

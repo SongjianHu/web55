@@ -2090,6 +2090,20 @@ def _renumber_doc(doc, types: set, override_existing: bool = True):
     _ensure_caption_styles(doc)
     body = doc.element.body
 
+    # 封面截断：封面（题目页/声明/信息表）内的图表公式不参与编号，
+    # 也不污染章节计数；之前误编号留下的旧题注同样跳过不再重排。
+    _children = list(body)
+    _cpos = _cover_cutoff_pos(doc, _children)
+    _pos = {id(c): i for i, c in enumerate(_children)}
+
+    def _before_cover(p):
+        if _cpos == 0:
+            return False
+        anc = p
+        while anc is not None and anc.getparent() is not body:
+            anc = anc.getparent()
+        return anc is not None and _pos.get(id(anc), _cpos) < _cpos
+
     id2name: dict = {}
     name2style: dict = {}
     for s in doc.styles:
@@ -2109,6 +2123,9 @@ def _renumber_doc(doc, types: set, override_existing: bool = True):
     text_w  = _cap_text_width_twips(doc)
 
     for p_elem in body.iter(qn("w:p")):
+        if _before_cover(p_elem):
+            continue  # 封面内容（含信息表内段落）一律不编号
+
         sname = _cap_p_sname(p_elem, id2name)
 
         # 顶层段落：一级标题 → 章节计数
@@ -2258,6 +2275,28 @@ def _para_has_equation(p_elem) -> bool:
     return False
 
 
+def _cover_cutoff_el(doc):
+    """封面之后第一个正式内容段落：优先前置节起点（摘要），否则正文起点（绪论/第1章）。
+
+    图/表/公式自动编号必须跳过封面——题目页、原创性声明、**封面信息表**
+    （题目/学号/导师/日期那张表）都在此元素之前，按章节 X-Y 编号对它们无意义。
+    识别不到（无摘要也无正文标志）则返回 None，调用方退化为不跳过（保持旧行为）。
+    """
+    # 注意：不能用 `a or b`——lxml 元素的真值测试已弃用且未来恒为 True
+    el = _abstract_section_start_para(doc)
+    if el is None:
+        el = _first_para_matching(doc, _TS_BODY_RE)
+    return el
+
+
+def _cover_cutoff_pos(doc, children) -> int:
+    """cutoff 元素在 body 子元素快照 children 中的下标；无则 0（不跳过）。"""
+    el = _cover_cutoff_el(doc)
+    if el is None:
+        return 0
+    return next((i for i, c in enumerate(children) if c is el), 0)
+
+
 def _make_placeholder_fig_tbl_para(doc, cap_type: str):
     """生成图题/表题占位段落 <w:p>（仅用于 fig/tbl，公式由 renumber_all 内联处理）。"""
     style_name  = _CAP_STYLE_MAP[cap_type]
@@ -2298,7 +2337,11 @@ def _insert_fig_placeholders(doc, override_existing: bool):
     """在每个含图片的段落后插入「图 X-Y …」占位题注。"""
     _ensure_caption_styles(doc)
     body = doc.element.body
-    for child in list(body):
+    children = list(body)
+    cpos = _cover_cutoff_pos(doc, children)  # 跳过封面（信息表/题目页/声明）内的图
+    for idx, child in enumerate(children):
+        if idx < cpos:
+            continue
         if child.tag != qn("w:p") or not _para_has_drawing(child):
             continue
         nxt = child.getnext()
@@ -2313,7 +2356,11 @@ def _insert_tbl_placeholders(doc, override_existing: bool):
     """在每个表格上方插入「表 X-Y …」占位题注。"""
     _ensure_caption_styles(doc)
     body = doc.element.body
-    for child in list(body):
+    children = list(body)
+    cpos = _cover_cutoff_pos(doc, children)  # 跳过封面信息表，不给它加表题
+    for idx, child in enumerate(children):
+        if idx < cpos:
+            continue
         if child.tag != qn("w:tbl"):
             continue
         prev = child.getprevious()

@@ -23,12 +23,13 @@ export const api = {
     return fetch('/upload', { method: 'POST', body: f }).then(j);
   },
 
-  // POST /chat  form: session_id, message
+  // POST /chat  form: session_id, message, history(JSON [{role,content}])
   // -> {explanation, operations[], history_count, distilled?, needs_input?}
-  chat(sessionId, message) {
+  chat(sessionId, message, history) {
     const f = new FormData();
     f.append('session_id', sessionId);
     f.append('message', message);
+    if (history && history.length) f.append('history', JSON.stringify(history));
     return fetch('/chat', { method: 'POST', body: f }).then(j);
   },
 

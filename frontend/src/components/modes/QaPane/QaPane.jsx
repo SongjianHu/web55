@@ -1,6 +1,7 @@
 import { useRef, useState } from 'react';
 import { api } from '../../../lib/api.js';
 import Button from '../../ui/Button.jsx';
+import { InfoTip } from '../../ui/Tooltip.jsx';
 import LiteraturePanel from './LiteraturePanel.jsx';
 import QaThread from './QaThread.jsx';
 
@@ -21,15 +22,23 @@ export default function QaPane() {
         ? `${q}\n（附带 ${refs.length} 篇检索文献）`
         : q
       : `请按 GB/T 7714—2015 规范以下 ${refs.length} 篇检索文献的著录格式`;
-    setBubbles((b) => [...b, { role: 'user', text: userText }]);
+    setBubbles((b) => [
+      ...b,
+      { role: 'user', text: userText },
+      { role: 'bot', pending: true },
+    ]);
     setSending(true);
+    const settle = (patch) =>
+      setBubbles((b) =>
+        b.map((x, i) => (i === b.length - 1 && x.pending ? patch : x)),
+      );
     try {
       const data = await api.qa(q, historyRef.current.slice(-6), refs);
-      setBubbles((b) => [...b, { role: 'bot', text: data.answer }]);
+      settle({ role: 'bot', text: data.answer });
       historyRef.current.push({ role: 'user', content: userText });
       historyRef.current.push({ role: 'assistant', content: data.answer });
     } catch (err) {
-      setBubbles((b) => [...b, { role: 'bot', text: '出错了：' + err.message }]);
+      settle({ role: 'bot', text: '出错了：' + err.message });
     } finally {
       setSending(false);
     }
@@ -38,12 +47,10 @@ export default function QaPane() {
   return (
     <div className="scroll-thin flex-1 overflow-auto pt-1">
       <div className="card flex flex-col p-3.5">
-        <h3 className="text-[13px] font-bold text-ink-heading">
+        <h3 className="mb-2 flex items-center gap-1.5 text-[13px] font-bold text-ink-heading">
           💬 论文格式答疑
+          <InfoTip content="基于 GB/T 7714 / GB/T 7713 等国标与通用排版规范作答。" />
         </h3>
-        <div className="mb-2 mt-[-4px] text-[11px] text-ink-faint">
-          基于 GB/T 7714 / GB/T 7713 等国标与通用排版规范作答。
-        </div>
 
         <LiteraturePanel selected={selected} setSelected={setSelected} />
 
