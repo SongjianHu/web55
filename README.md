@@ -20,7 +20,12 @@ web55/
 │   ├── checker.py         # 论文格式检查
 │   ├── openalex_search.py # OpenAlex 文献检索
 │   └── zotero_save.py     # 存入 Zotero
-├── static/index.html      # 聊天前端
+├── frontend/              # 前端源码：Vite + React + Tailwind（开发用）
+│   ├── src/               # React 组件 / hooks / API 客户端
+│   ├── package.json
+│   ├── vite.config.js     # base=/static/，构建产物输出到 ../static
+│   └── tailwind.config.js # 设计令牌（暖金主色 / 白底渐变 / 文字层级）
+├── static/                # Vite 构建产物（index.html + assets/，由后端托管）
 ├── knowledge/             # 国标 PDF 知识库（随仓库分发）
 ├── docs/                  # API / 使用 / 技术文档
 ├── sessions/              # 运行时自动创建，每个会话的工作文档（已 gitignore）
@@ -43,6 +48,29 @@ python run.py
 打开 http://127.0.0.1:8000
 
 > 生产部署可直接 `uvicorn app.main:app --host 0.0.0.0 --port 8000`。
+> `static/` 中已包含构建好的前端产物，**无需 Node 即可运行**。
+
+## 前端开发（Vite + React + Tailwind）
+
+前端为组件化的 React 工程，源码在 `frontend/`，构建产物输出到 `static/`
+（`GET /` 返回 `static/index.html`，hash 资源由 `app.mount("/static", StaticFiles)` 托管）。
+
+```bash
+cd frontend
+npm install
+
+# 开发：Vite 热更新（:5173），API 自动代理到后端 :8000
+#   需另开一个终端运行 python run.py
+npm run dev
+
+# 构建：产物写入 ../static/（提交到仓库，生产无需 Node）
+npm run build
+```
+
+设计规范：白底 + 角落极淡暖米/浅紫径向渐变；卡片白底圆角 12–16px；
+主色暖金 `#D4AF37`；标题 `#333`/500、正文 `#666`/400；线性描边图标。
+令牌集中在 `frontend/tailwind.config.js` 与 `frontend/src/index.css`。
+修改前端后需 `npm run build` 才会反映到 `uvicorn` 启动的站点。
 
 ## 使用示例
 

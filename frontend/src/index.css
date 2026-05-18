@@ -1,0 +1,214 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@layer base {
+  *,
+  *::before,
+  *::after {
+    box-sizing: border-box;
+  }
+  html,
+  body,
+  #root {
+    height: 100%;
+  }
+  html,
+  body {
+    overflow: hidden;
+  }
+  body {
+    @apply font-sans text-ink-body;
+    font-size: 14px;
+    /* 接近纯白的基底，让两颗渐变球与玻璃边缘有层次 */
+    background-color: #fbfbfd;
+  }
+  /* 背景：两颗大号径向渐变球（暖金 / 浅紫），缓慢漂浮，液态玻璃透出 */
+  body::before,
+  body::after {
+    content: '';
+    position: fixed;
+    z-index: 0;
+    border-radius: 50%;
+    pointer-events: none;
+    filter: blur(40px);
+    will-change: transform;
+  }
+  body::before {
+    top: -14vh;
+    left: -10vw;
+    width: 48vw;
+    height: 48vw;
+    background: radial-gradient(
+      circle at center,
+      rgba(212, 175, 55, 0.34) 0%,
+      rgba(212, 175, 55, 0.16) 38%,
+      rgba(212, 175, 55, 0) 70%
+    );
+    animation: floatA 22s ease-in-out infinite;
+  }
+  body::after {
+    right: -12vw;
+    bottom: -16vh;
+    width: 52vw;
+    height: 52vw;
+    background: radial-gradient(
+      circle at center,
+      rgba(155, 115, 232, 0.32) 0%,
+      rgba(178, 150, 235, 0.15) 40%,
+      rgba(178, 150, 235, 0) 70%
+    );
+    animation: floatB 26s ease-in-out infinite;
+  }
+  /* 内容层在渐变球之上 */
+  #root {
+    position: relative;
+    z-index: 1;
+  }
+  @keyframes floatA {
+    0%,
+    100% {
+      transform: translate(0, 0) scale(1);
+    }
+    50% {
+      transform: translate(6vw, 5vh) scale(1.12);
+    }
+  }
+  @keyframes floatB {
+    0%,
+    100% {
+      transform: translate(0, 0) scale(1);
+    }
+    50% {
+      transform: translate(-5vw, -4vh) scale(1.1);
+    }
+  }
+  @media (prefers-reduced-motion: reduce) {
+    body::before,
+    body::after {
+      animation: none;
+    }
+  }
+  h1,
+  h2,
+  h3,
+  h4 {
+    @apply text-ink-heading;
+    font-weight: 500;
+  }
+  /* 线性描边图标统一规格：24x24、1.5px、随文字颜色 */
+  .icon {
+    width: 24px;
+    height: 24px;
+    fill: none;
+    stroke: currentColor;
+    stroke-width: 1.5;
+    stroke-linecap: round;
+    stroke-linejoin: round;
+    flex-shrink: 0;
+  }
+}
+
+@layer components {
+  /* ── 液态玻璃 ──
+     半透明白 + 背景模糊 + 柔和描边 + 顶部高光，渐变球在其后晕染。 */
+  .glass {
+    background: rgba(255, 255, 255, 0.55);
+    backdrop-filter: blur(22px) saturate(165%);
+    -webkit-backdrop-filter: blur(22px) saturate(165%);
+    border: 1px solid rgba(255, 255, 255, 0.6);
+    box-shadow:
+      0 6px 28px rgba(40, 35, 20, 0.07),
+      inset 0 1px 0 rgba(255, 255, 255, 0.7);
+  }
+  /* 大面积底板：更通透、模糊更强，避免发灰 */
+  .glass-soft {
+    background: rgba(255, 255, 255, 0.42);
+    backdrop-filter: blur(28px) saturate(150%);
+    -webkit-backdrop-filter: blur(28px) saturate(150%);
+  }
+  /* 顶部 / 工具条：横向玻璃带，底部一道高光描边 */
+  .glass-bar {
+    background: rgba(255, 255, 255, 0.55);
+    backdrop-filter: blur(20px) saturate(165%);
+    -webkit-backdrop-filter: blur(20px) saturate(165%);
+    border-bottom: 1px solid rgba(255, 255, 255, 0.55);
+    box-shadow: 0 2px 16px rgba(40, 35, 20, 0.05);
+  }
+  /* 主按钮：金填充 + 白字 + 圆角 8px */
+  .btn-primary {
+    @apply inline-flex items-center justify-center gap-1.5 rounded-btn bg-gold
+      px-4 py-2 text-sm font-medium text-white transition
+      hover:bg-gold-deep disabled:pointer-events-none disabled:opacity-40;
+  }
+  /* 次按钮：浅灰底 + 深灰字 + 圆角 8px */
+  .btn-secondary {
+    @apply inline-flex items-center justify-center gap-1.5 rounded-btn
+      bg-gray-100 px-4 py-2 text-sm font-medium text-ink-heading transition
+      hover:bg-gray-200 disabled:pointer-events-none disabled:opacity-40;
+  }
+  /* 卡片：玻璃 + 圆角 12-16 */
+  .card {
+    @apply rounded-card;
+    background: rgba(255, 255, 255, 0.55);
+    backdrop-filter: blur(22px) saturate(165%);
+    -webkit-backdrop-filter: blur(22px) saturate(165%);
+    border: 1px solid rgba(255, 255, 255, 0.6);
+    box-shadow:
+      0 6px 28px rgba(40, 35, 20, 0.07),
+      inset 0 1px 0 rgba(255, 255, 255, 0.7);
+  }
+  .field {
+    @apply rounded-btn px-3 py-2 text-sm text-ink-heading outline-none transition
+      focus:border-gold focus:ring-2 focus:ring-gold/20;
+    background: rgba(255, 255, 255, 0.5);
+    border: 1px solid rgba(255, 255, 255, 0.65);
+  }
+  .scroll-thin {
+    scrollbar-width: thin;
+    scrollbar-color: rgba(150, 140, 120, 0.45) transparent;
+  }
+  .scroll-thin::-webkit-scrollbar {
+    width: 5px;
+    height: 5px;
+  }
+  .scroll-thin::-webkit-scrollbar-thumb {
+    background: rgba(150, 140, 120, 0.4);
+    border-radius: 9999px;
+  }
+  .scroll-thin::-webkit-scrollbar-track {
+    background: transparent;
+  }
+}
+
+/* 点击波纹关键帧（全局，供 useRipple 使用） */
+@keyframes ripple {
+  from {
+    transform: scale(0);
+    opacity: 0.55;
+  }
+  to {
+    transform: scale(2.6);
+    opacity: 0;
+  }
+}
+
+/* docx-preview：库注入的 DOM，必须全局选择器（不可 Tailwind 作用域化）。
+   文档页面保持纯白实底（保证正文可读），仅外观加玻璃投影。 */
+#previewContainer {
+  width: 100%;
+}
+#previewContainer .docx-wrapper {
+  background: transparent !important;
+  padding: 0 !important;
+  display: flex !important;
+  flex-direction: column !important;
+  align-items: center !important;
+  gap: 20px !important;
+}
+#previewContainer section.docx {
+  background: #fff !important;
+  box-shadow:
+    0 10px 40px rgba(40, 35, 20, 0.16),
+    0 0 0 1px rgba(255, 255, 255, 0.6) !important;
+}

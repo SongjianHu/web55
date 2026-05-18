@@ -14,6 +14,7 @@ from typing import List
 
 from fastapi import FastAPI, UploadFile, File, Form, HTTPException
 from fastapi.responses import FileResponse, HTMLResponse
+from fastapi.staticfiles import StaticFiles
 
 import json as _json
 
@@ -47,6 +48,11 @@ MAX_HISTORY = 20
 
 WORK_DIR.mkdir(exist_ok=True)
 BATCH_DIR.mkdir(exist_ok=True)
+
+# Vite 构建产物（index.html + assets/）输出到 static/；
+# index.html 以 /static/assets/* 引用 hash 资源，由此挂载解析。
+# 挂载在 /static，不影响 GET /（仍返回 static/index.html 文本）。
+app.mount("/static", StaticFiles(directory=STATIC_DIR), name="static")
 
 
 # ── 版本历史工具 ──
