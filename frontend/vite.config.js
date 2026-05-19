@@ -8,6 +8,7 @@ const API_PREFIXES = [
   '/upload', '/chat', '/undo', '/download', '/structure',
   '/defaults', '/apply_defaults', '/batch', '/extract_text',
   '/check', '/qa', '/openalex', '/zotero', '/knowledge',
+  '/render', '/jobs', '/health',
 ];
 
 export default defineConfig({

@@ -10,6 +10,7 @@ import CheckPane from './components/modes/CheckPane/CheckPane.jsx';
 import QaPane from './components/modes/QaPane/QaPane.jsx';
 import PreviewPane from './components/preview/PreviewPane.jsx';
 import BatchModal from './components/batch/BatchModal.jsx';
+import AuthGate from './components/auth/AuthGate.jsx';
 
 export default function App() {
   const { mode } = useSession();
@@ -44,10 +45,12 @@ export default function App() {
   );
 
   return (
-    <div className="flex h-full flex-col">
-      <AppHeader />
-      <MainLayout left={left} right={<PreviewPane />} />
-      <BatchModal open={batchOpen} onClose={() => setBatchOpen(false)} />
-    </div>
+    <AuthGate>
+      <div className="flex h-full flex-col">
+        <AppHeader />
+        <MainLayout left={left} right={<PreviewPane />} />
+        <BatchModal open={batchOpen} onClose={() => setBatchOpen(false)} />
+      </div>
+    </AuthGate>
   );
 }

@@ -1,17 +1,37 @@
-fastapi>=0.110
-uvicorn[standard]>=0.27
-python-docx>=1.1
-anthropic>=0.40
-python-multipart>=0.0.9
-pydantic>=2.6
+# 安装入口（README/Dockerfile 用 pip install -r）。与 pyproject.toml 保持一致。
+#
+# 复现性说明：以下「核心 web 栈」按本机 .venv 实测版本精确锁定（==）。
+# 提取/OCR 三件套（pypdf/pymupdf/rapidocr）与新增中间件用下限（>=）：
+# 锁死未经本机验证的 patch 版本反而会让 docker build 失败。
+# ⇒ 首次 docker build 成功后，在 web 容器内执行
+#      pip freeze > requirements.lock
+#    并在 CI/生产改用 `pip install -r requirements.lock` 获得完全可复现构建。
 
-# 文件文本提取（需求文档解析 / 知识库 PDF 入库）
+# ── 核心 web 栈（实测精确锁定）──
+fastapi==0.136.1
+uvicorn[standard]==0.46.0
+python-docx==1.2.0
+anthropic==0.98.1
+python-multipart==0.0.27
+pydantic==2.13.3
+httpx==0.28.1
+python-dotenv==1.2.2
+
+# ── 文件文本提取（需求文档解析 / 知识库 PDF 入库）──
+# 本机 .venv 未安装，docker build 时解析；锁定见 requirements.lock。
 pypdf>=4.0
 pymupdf>=1.23
 rapidocr_onnxruntime>=1.3
 
-# 问答模式文献检索（OpenAlex）与存入 Zotero；httpx 亦为 anthropic 依赖，此处显式声明
-httpx>=0.27
+# ── 任务队列 + 会话消息（Redis 两用：Broker/进度 pub/sub + messages 持久化）──
+# arq 约束 redis<6；显式写出避免 docker build 时 pip 回溯。
+redis>=5.0,<6
+arq>=0.25
 
-# 从 .env 读取环境变量（ANTHROPIC_API_KEY 等），见 .env.example
-python-dotenv>=1.0
+# ── 元数据持久化（SQLite，WAL）+ 最小认证 ──
+SQLAlchemy>=2.0
+bcrypt>=4.0                # 直接用 bcrypt 做口令哈希（弃 passlib，免版本探测摩擦）
+itsdangerous>=2.1          # Starlette SessionMiddleware 签名 Cookie 依赖
+
+# ── 会话 TTL 清理（进程内调度，无需 Celery）──
+APScheduler>=3.10

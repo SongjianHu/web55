@@ -1,0 +1,118 @@
+# 生产编排（Ubuntu）：caddy(HTTPS) → web → {redis, render}
+# 本地 Windows 开发请改用：docker compose -f docker-compose.dev.yml up -d
+#   （只起 redis+render 并把端口发布到 localhost，主应用原生 python run.py 热重载）
+#
+# 启动：  cp .env.example .env && 填好 ANTHROPIC_API_KEY，然后 docker compose up -d --build
+# 备份：  tar 打包 ./sessions ./data ./knowledge 与 redis-data 卷即可
+
+services:
+  redis:
+    image: redis:7-alpine
+    # AOF 持久化（会话消息不丢）；限内存 + LRU，jobs blob 设 TTL 由应用控制
+    command: >
+      redis-server --appendonly yes
+      --maxmemory 256mb --maxmemory-policy allkeys-lru
+    volumes:
+      - redis-data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+    restart: unless-stopped
+
+  render:
+    build:
+      context: .
+      dockerfile: render_service/Dockerfile
+    environment:
+      - REDIS_URL=redis://redis:6379/0
+      # 同时启 HTTP(同步渲染) 与 arq worker(消费队列)；见 render_service/Dockerfile CMD
+      - RENDER_MAX_CONCURRENCY=2
+    depends_on:
+      redis:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8001/health')"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+    restart: unless-stopped
+
+  web:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    env_file:
+      - .env
+    environment:
+      - REDIS_URL=redis://redis:6379/0
+      - RENDER_SERVICE_URL=http://render:8001
+      - DATA_DIR=/app/data
+      - SESSION_TTL_DAYS=14
+      - WEB_CONCURRENCY=2
+      # 小范围多人：默认启用账号 + 会话归属校验（首个账号 POST /auth/register）
+      - AUTH_ENABLED=true
+    volumes:
+      - ./sessions:/app/sessions
+      - ./knowledge:/app/knowledge
+      - ./data:/app/data
+    depends_on:
+      redis:
+        condition: service_healthy
+      render:
+        condition: service_started
+    expose:
+      - "8000"
+    restart: unless-stopped
+
+  # 批量排版异步消费者（web 镜像，需 app 代码；与 render 队列分离）
+  web-worker:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    env_file:
+      - .env
+    environment:
+      - REDIS_URL=redis://redis:6379/0
+    volumes:
+      - ./sessions:/app/sessions      # 与 web 共享 sessions/_batch，产出 zip 可被 /batch 下载
+      - ./knowledge:/app/knowledge
+      - ./data:/app/data
+    command: ["arq", "app.worker.WorkerSettings"]
+    depends_on:
+      redis:
+        condition: service_healthy
+    restart: unless-stopped
+
+  # 异步渲染消费者（render 镜像，含 LibreOffice；供批量/大文档/带进度场景）
+  render-worker:
+    build:
+      context: .
+      dockerfile: render_service/Dockerfile
+    environment:
+      - REDIS_URL=redis://redis:6379/0
+      - RENDER_MAX_CONCURRENCY=2
+    command: ["arq", "render_service.worker.WorkerSettings"]
+    depends_on:
+      redis:
+        condition: service_healthy
+    restart: unless-stopped
+
+  caddy:
+    image: caddy:2-alpine
+    depends_on:
+      - web
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy-data:/data
+      - caddy-config:/config
+    restart: unless-stopped
+
+volumes:
+  redis-data:
+  caddy-data:
+  caddy-config:

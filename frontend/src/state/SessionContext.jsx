@@ -5,9 +5,12 @@ import {
   useCallback,
   useMemo,
   useRef,
+  useEffect,
 } from 'react';
+import { api } from '../lib/api.js';
 
 const SessionContext = createContext(null);
+const LS_KEY = 'web55.session'; // {id, name} —— 刷新后据此向服务端恢复
 
 export function SessionProvider({ children }) {
   const [sessionId, setSessionId] = useState(null);
@@ -67,6 +70,11 @@ export function SessionProvider({ children }) {
     setSessionId(id);
     setFilename(name);
     setStatus(`已加载：${name}`);
+    try {
+      localStorage.setItem(LS_KEY, JSON.stringify({ id, name }));
+    } catch {
+      /* localStorage 不可用时仅失去刷新恢复，不影响主流程 */
+    }
   }, []);
 
   const reset = useCallback(() => {
@@ -77,6 +85,52 @@ export function SessionProvider({ children }) {
     setStatus('未上传文档');
     setMode('format');
     setMessages([]);
+    try {
+      localStorage.removeItem(LS_KEY);
+    } catch {
+      /* 同上 */
+    }
+  }, []);
+
+  // 刷新/重进恢复：localStorage 有会话 → 向服务端核对，存在则恢复
+  // 文档状态、历史步数与服务端聊天消息（Redis 持久化）。
+  useEffect(() => {
+    let saved;
+    try {
+      saved = JSON.parse(localStorage.getItem(LS_KEY) || 'null');
+    } catch {
+      saved = null;
+    }
+    if (!saved?.id) return;
+    let cancelled = false;
+    (async () => {
+      try {
+        const r = await api.sessionRestore(saved.id);
+        if (cancelled) return;
+        if (!r.exists) {
+          localStorage.removeItem(LS_KEY);
+          return;
+        }
+        setSessionId(saved.id);
+        setFilename(saved.name);
+        setStatus(`已恢复：${saved.name}`);
+        setHistoryCount(r.history_count || 0);
+        if (Array.isArray(r.messages) && r.messages.length) {
+          setMessages(
+            r.messages.map((m) => ({
+              id: ++msgSeq.current,
+              role: m.role === 'user' ? 'user' : 'bot',
+              text: m.content || '',
+            })),
+          );
+        }
+      } catch {
+        /* 恢复失败（如离线/无 Redis）→ 维持空白，用户重新上传即可 */
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
   }, []);
 
   const value = useMemo(

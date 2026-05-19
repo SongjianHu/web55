@@ -1,0 +1,38 @@
+# 本地 Windows 开发闭环：只用 Docker 跑 redis + render，端口发布到 localhost；
+# 主应用原生热重载运行：  python run.py
+#
+#   docker compose -f docker-compose.dev.yml up -d --build
+#   # 另开终端：
+#   set REDIS_URL=redis://localhost:6379/0
+#   set RENDER_SERVICE_URL=http://localhost:8001
+#   python run.py        # 改 app/ 代码即时热重载，渲染/队列走容器
+#
+# （PowerShell 用 $env:REDIS_URL=... ；或写进 .env，__init__.py 会加载）
+
+services:
+  redis:
+    image: redis:7-alpine
+    command: >
+      redis-server --appendonly yes
+      --maxmemory 256mb --maxmemory-policy allkeys-lru
+    ports:
+      - "6379:6379"          # 暴露给原生主应用
+    volumes:
+      - redis-data-dev:/data
+    restart: unless-stopped
+
+  render:
+    build:
+      context: .
+      dockerfile: render_service/Dockerfile
+    environment:
+      - REDIS_URL=redis://redis:6379/0
+      - RENDER_MAX_CONCURRENCY=2
+    ports:
+      - "8001:8001"          # 暴露给原生主应用做实时调试
+    depends_on:
+      - redis
+    restart: unless-stopped
+
+volumes:
+  redis-data-dev:

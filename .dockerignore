@@ -1,0 +1,41 @@
+# 构建上下文裁剪：避免把本机虚拟环境/依赖/运行时数据塞进镜像
+.git/
+.gitignore
+.venv/
+venv/
+env/
+ENV/
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+
+# 运行时数据（容器内由卷提供）
+sessions/
+data/
+
+# 前端依赖与构建中间产物（镜像内 npm ci 重新安装）
+frontend/node_modules/
+frontend/.vite/
+.vite-check/
+static/
+
+# 密钥与本地配置（通过 compose env_file / 卷注入，不进镜像）
+.env
+.env.local
+*.local
+
+# 文档 / 编辑器 / 操作系统
+docs/
+*.md
+.idea/
+.vscode/
+*.swp
+*~
+.DS_Store
+Thumbs.db
+plans/

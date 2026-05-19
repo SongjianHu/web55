@@ -1,4 +1,4 @@
-import { useRef, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { useSession } from '../../state/SessionContext.jsx';
 import { api } from '../../lib/api.js';
 import { useDragDrop } from '../../lib/useDragDrop.js';
@@ -19,8 +19,16 @@ export default function BatchModal({ open, onClose }) {
   const [message, setMessage] = useState('');
   const [useDefaults, setUseDefaults] = useState(true);
   const [processing, setProcessing] = useState(false);
+  const [progress, setProgress] = useState(null); // {done,total,current,pct}
   const [result, setResult] = useState(null); // {data} | {error}
   const fileInputRef = useRef(null);
+  const aliveRef = useRef(true);
+  useEffect(() => {
+    aliveRef.current = true;
+    return () => {
+      aliveRef.current = false;
+    };
+  }, []);
 
   function addFiles(fileList) {
     setFiles((cur) => {
@@ -40,7 +48,10 @@ export default function BatchModal({ open, onClose }) {
     setFiles([]);
     setMessage('');
     setResult(null);
+    setProgress(null);
   }
+
+  const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
   async function runBatch() {
     const ids = useDefaults ? checkedDefaultIds : [];
@@ -56,13 +67,31 @@ export default function BatchModal({ open, onClose }) {
     }
     setProcessing(true);
     setResult(null);
+    setProgress(null);
     try {
-      const data = await api.batch(files, ids, msg);
-      setResult({ data });
+      const resp = await api.batch(files, ids, msg);
+      if (resp.queued) {
+        // 异步：轮询 job 状态直至终态（SSE 亦可，轮询足够稳）
+        let st = { status: 'queued' };
+        while (st.status === 'queued' || st.status === 'in_progress') {
+          await sleep(1500);
+          if (!aliveRef.current) return;
+          st = await api.jobStatus(resp.job_id);
+          if (st.progress) setProgress(st.progress);
+        }
+        if (st.status === 'complete') setResult({ data: st.result });
+        else setResult({ error: st.error || `任务状态：${st.status}` });
+      } else {
+        // 同步降级（无 Redis）：直接拿到完整结果
+        setResult({ data: resp });
+      }
     } catch (err) {
       setResult({ error: err.message });
     } finally {
-      setProcessing(false);
+      if (aliveRef.current) {
+        setProcessing(false);
+        setProgress(null);
+      }
     }
   }
 
@@ -194,7 +223,11 @@ export default function BatchModal({ open, onClose }) {
             <div className="flex items-center gap-2.5 p-3 text-[12.5px] text-ink-body">
               <Spinner size={20} />
               <span>
-                正在处理 {files.length} 个文件…（每份约 1-3 秒，如含 LLM 解析会更慢）
+                {progress
+                  ? `处理中 ${progress.done}/${progress.total}` +
+                    (progress.current ? ` · ${progress.current}` : '') +
+                    ` (${progress.pct}%)`
+                  : `正在排队/处理 ${files.length} 个文件…（每份约 1-3 秒，如含 LLM 解析会更慢）`}
               </span>
             </div>
           )}

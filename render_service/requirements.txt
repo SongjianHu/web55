@@ -1,0 +1,9 @@
+# 渲染服务最小依赖（与主应用解耦，独立镜像）。
+# PDF→PNG 用系统 poppler-utils(pdftoppm)，不引 python pdf 库。
+fastapi==0.136.1
+uvicorn[standard]==0.46.0
+python-multipart==0.0.27
+
+# Phase 3 队列消费者用（worker.py）；HTTP-only 运行时不加载。
+redis>=5.0,<6
+arq>=0.25

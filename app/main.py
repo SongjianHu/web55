@@ -4,6 +4,7 @@ FastAPI 后端：上传、聊天修改、撤销、下载接口 + 静态首页。
 版本控制：每次 chat 操作前将 current.docx 快照存入 sessions/{id}/history/，
 最多保留 MAX_HISTORY 步，/undo 接口弹出最新快照恢复。
 """
+import asyncio
 import io
 import re as _re
 import shutil
@@ -12,11 +13,17 @@ import zipfile
 from pathlib import Path
 from typing import List
 
-from fastapi import FastAPI, UploadFile, File, Form, HTTPException
+import os as _os
+
+from fastapi import FastAPI, UploadFile, File, Form, HTTPException, Request
 from fastapi.responses import FileResponse, HTMLResponse
 from fastapi.staticfiles import StaticFiles
+from starlette.middleware.sessions import SessionMiddleware
 
 import json as _json
+
+from . import auth as _auth
+from . import db as _db
 
 from .llm_parser import parse_command
 from .docx_formatter import (
@@ -38,6 +45,31 @@ from .zotero_save import save_items as zotero_save_items
 
 
 app = FastAPI(title="Docx Chat Editor")
+
+# 签名 Cookie 会话（最小认证用）。SECRET_KEY 生产务必在 .env 改成随机串。
+app.add_middleware(
+    SessionMiddleware,
+    secret_key=_os.getenv("SECRET_KEY", "dev-only-change-me"),
+    same_site="lax",
+    https_only=False,   # 由 Caddy 终止 TLS；容器内为 http
+)
+app.include_router(_auth.router)
+
+
+@app.on_event("startup")
+async def _on_startup():
+    # 建库（幂等）+ 启动会话 TTL 清理调度（仅 web 主进程）
+    import asyncio
+
+    from .cleanup import start_scheduler
+    await asyncio.to_thread(_db.init_db)
+    start_scheduler()
+
+
+@app.on_event("shutdown")
+async def _on_shutdown():
+    from .cleanup import shutdown_scheduler
+    shutdown_scheduler()
 
 # 仓库根目录（app/ 的上一级）。数据/资源目录均以此为基准，与启动时的工作目录无关。
 BASE_DIR   = Path(__file__).resolve().parent.parent
@@ -94,13 +126,37 @@ def _restore_snapshot(session_dir: Path) -> bool:
 
 # ── 路由 ──
 
+@app.get("/health")
+async def health():
+    """容器存活/就绪探针（compose / 反代用）。liveness 恒 ok，附依赖就绪。"""
+    from . import __version__
+    out = {"status": "ok", "version": __version__}
+
+    from .redis_client import redis_configured
+    if redis_configured():
+        try:
+            from .redis_client import get_redis
+            r = await get_redis()
+            await r.ping()
+            out["redis"] = "ok"
+        except Exception:
+            out["redis"] = "down"
+    else:
+        out["redis"] = "disabled"
+
+    from .render_client import render_configured
+    out["render"] = "configured" if render_configured() else "disabled"
+    out["auth"] = "enabled" if _auth.auth_enabled() else "disabled"
+    return out
+
+
 @app.get("/", response_class=HTMLResponse)
 async def index():
     return (STATIC_DIR / "index.html").read_text(encoding="utf-8")
 
 
 @app.post("/upload")
-async def upload_doc(file: UploadFile = File(...)):
+async def upload_doc(request: Request, file: UploadFile = File(...)):
     if not file.filename.lower().endswith(".docx"):
         raise HTTPException(400, "只支持 .docx 文件")
 
@@ -111,11 +167,33 @@ async def upload_doc(file: UploadFile = File(...)):
     with open(session_dir / "current.docx", "wb") as f:
         shutil.copyfileobj(file.file, f)
 
+    # 记录会话归属（启用鉴权时据此校验；未登录则 owner=None，匿名兼容）
+    user = _auth.current_user(request)
+    try:
+        await asyncio.to_thread(
+            _db.upsert_session, session_id,
+            user["id"] if user else None, file.filename,
+        )
+    except Exception:
+        pass
+
     return {"session_id": session_id, "filename": file.filename}
+
+
+async def _persist_msg(session_id: str, role: str, content: str) -> None:
+    """会话消息落 Redis；未配置/不可达则静默跳过（降级，不阻断主流程）。"""
+    if not content:
+        return
+    try:
+        from .messages import append_message
+        await append_message(session_id, role, content)
+    except Exception:
+        pass
 
 
 @app.post("/chat")
 async def chat(
+    request: Request,
     session_id: str = Form(...),
     message: str = Form(...),
     history: str = Form("[]"),
@@ -124,14 +202,29 @@ async def chat(
     doc_path = session_dir / "current.docx"
     if not doc_path.exists():
         raise HTTPException(404, "会话不存在或文档已丢失，请先上传 docx")
+    await _auth.require_owner(session_id, request)
+    await asyncio.to_thread(_db.touch_session, session_id)
 
-    # 多轮历史（澄清式追问依赖它：先问学校/学历，用户补充后才能生成 thesis_sections）
+    # 多轮历史：优先服务端 Redis 会话消息（刷新/换设备可恢复上下文），
+    # Redis 未配置/为空时回退前端回传的 history（向后兼容，离线开发可用）。
+    hist = []
     try:
-        hist = _json.loads(history) if history else []
-        if not isinstance(hist, list):
-            hist = []
-    except (ValueError, _json.JSONDecodeError):
+        from .messages import get_messages, to_llm_history
+        srv = await get_messages(session_id)
+        if srv:
+            hist = to_llm_history(srv)
+    except Exception:
         hist = []
+    if not hist:
+        try:
+            hist = _json.loads(history) if history else []
+            if not isinstance(hist, list):
+                hist = []
+        except (ValueError, _json.JSONDecodeError):
+            hist = []
+
+    # 本轮用户消息入库（早写：澄清分支也能留存）
+    await _persist_msg(session_id, "user", message)
 
     # 1. 提取文档样式 + 大纲 + 推断的论文题目，作为 LLM 上下文
     try:
@@ -155,8 +248,10 @@ async def chat(
 
     # 2.5 LLM 信息不足时只返回澄清问题（operations 为空）→ 不动文档、不建快照
     if not parsed.operations:
+        clarify = parsed.explanation or "需要更多信息才能继续，请补充说明。"
+        await _persist_msg(session_id, "bot", clarify)
         return {
-            "explanation":   parsed.explanation or "需要更多信息才能继续，请补充说明。",
+            "explanation":   clarify,
             "operations":    [],
             "history_count": _history_count(session_dir),
             "needs_input":   True,
@@ -172,6 +267,7 @@ async def chat(
         _restore_snapshot(session_dir)
         raise HTTPException(500, f"文档修改失败：{e}")
 
+    await _persist_msg(session_id, "bot", parsed.explanation or "")
     return {
         "explanation":   parsed.explanation,
         "operations":    [op.model_dump(exclude_none=True) for op in parsed.operations],
@@ -180,21 +276,157 @@ async def chat(
     }
 
 
+@app.post("/chat/stream")
+async def chat_stream(
+    request: Request,
+    session_id: str = Form(...),
+    message: str = Form(...),
+    history: str = Form("[]"),
+):
+    """与 /chat 等价，但以 SSE 流出阶段事件改善感知延迟。
+
+    设计说明：parse_command 返回的是整块 JSON 指令（operations + explanation 字段），
+    不是可逐 token 显示的对话流；且 operations 必须完整才能套用到文档。强行做
+    token 级流式需重写核心解析逻辑，违背「稳定」目标。因此这里流式的是**阶段进度**
+    （理解指令 →[长文本: 提炼要求]→ 应用排版 → 完成），复用 SSE，零风险提升体验。
+
+    事件：data: {"stage":"parsing|applying|done|error", ...}
+    done 的 payload 与 /chat 返回体一致（前端可直接复用渲染逻辑）。
+    """
+    session_dir = WORK_DIR / session_id
+    doc_path = session_dir / "current.docx"
+    if not doc_path.exists():
+        raise HTTPException(404, "会话不存在或文档已丢失，请先上传 docx")
+    await _auth.require_owner(session_id, request)
+    await asyncio.to_thread(_db.touch_session, session_id)
+
+    from fastapi.responses import StreamingResponse
+
+    from .llm_parser import LONG_TEXT_THRESHOLD
+
+    def sse(obj: dict) -> str:
+        return f"data: {_json.dumps(obj, ensure_ascii=False)}\n\n"
+
+    async def gen():
+        # 多轮历史：Redis 会话消息优先，回退前端回传
+        hist = []
+        try:
+            from .messages import get_messages, to_llm_history
+            srv = await get_messages(session_id)
+            if srv:
+                hist = to_llm_history(srv)
+        except Exception:
+            hist = []
+        if not hist:
+            try:
+                hist = _json.loads(history) if history else []
+                if not isinstance(hist, list):
+                    hist = []
+            except (ValueError, _json.JSONDecodeError):
+                hist = []
+
+        await _persist_msg(session_id, "user", message)
+
+        long_text = len(message) >= LONG_TEXT_THRESHOLD
+        yield sse({
+            "stage": "parsing",
+            "text": "正在提炼并规划排版要求…" if long_text else "正在理解指令…",
+        })
+
+        try:
+            try:
+                available_styles = get_used_paragraph_styles(str(doc_path))
+                doc_structure = get_document_structure(str(doc_path))
+                doc_title = get_document_title(str(doc_path))
+            except Exception:
+                available_styles = doc_structure = None
+                doc_title = ""
+
+            parsed = await asyncio.to_thread(
+                parse_command, message,
+                available_styles, doc_structure, doc_title, hist,
+            )
+        except Exception as e:
+            yield sse({"stage": "error", "error": f"指令解析失败：{e}"})
+            return
+
+        if not parsed.operations:
+            clarify = parsed.explanation or "需要更多信息才能继续，请补充说明。"
+            await _persist_msg(session_id, "bot", clarify)
+            yield sse({
+                "stage": "done", "explanation": clarify, "operations": [],
+                "history_count": _history_count(session_dir), "needs_input": True,
+            })
+            return
+
+        yield sse({"stage": "applying", "text": "正在应用排版…"})
+        await asyncio.to_thread(_save_snapshot, session_dir)
+        try:
+            await asyncio.to_thread(
+                apply_operations, str(doc_path), str(doc_path), parsed.operations
+            )
+        except Exception as e:
+            await asyncio.to_thread(_restore_snapshot, session_dir)
+            yield sse({"stage": "error", "error": f"文档修改失败：{e}"})
+            return
+
+        await _persist_msg(session_id, "bot", parsed.explanation or "")
+        yield sse({
+            "stage": "done",
+            "explanation": parsed.explanation,
+            "operations": [op.model_dump(exclude_none=True) for op in parsed.operations],
+            "history_count": _history_count(session_dir),
+            "distilled": parsed.distilled,
+        })
+
+    return StreamingResponse(
+        gen(),
+        media_type="text/event-stream",
+        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+    )
+
+
 @app.post("/undo/{session_id}")
-async def undo(session_id: str):
+async def undo(session_id: str, request: Request):
     session_dir = WORK_DIR / session_id
     if not (session_dir / "current.docx").exists():
         raise HTTPException(404, "会话不存在")
+    await _auth.require_owner(session_id, request)
     if not _restore_snapshot(session_dir):
         raise HTTPException(400, "没有可撤销的操作")
     return {"history_count": _history_count(session_dir)}
 
 
+@app.get("/session/{session_id}")
+async def session_restore(session_id: str, request: Request):
+    """刷新/重进后恢复会话：文档是否在、历史步数、服务端聊天消息。
+
+    Redis 未配置时 messages 为空（前端退回本地态），不报错。
+    """
+    session_dir = WORK_DIR / session_id
+    exists = (session_dir / "current.docx").exists()
+    if exists:
+        await _auth.require_owner(session_id, request)
+    msgs = []
+    if exists:
+        try:
+            from .messages import get_messages
+            msgs = await get_messages(session_id)
+        except Exception:
+            msgs = []
+    return {
+        "exists": exists,
+        "history_count": _history_count(session_dir) if exists else 0,
+        "messages": msgs,
+    }
+
+
 @app.get("/download/{session_id}")
-async def download(session_id: str):
+async def download(session_id: str, request: Request):
     doc_path = WORK_DIR / session_id / "current.docx"
     if not doc_path.exists():
         raise HTTPException(404, "文档不存在")
+    await _auth.require_owner(session_id, request)
     return FileResponse(
         doc_path,
         filename="modified.docx",
@@ -202,11 +434,53 @@ async def download(session_id: str):
     )
 
 
-@app.get("/structure/{session_id}")
-async def get_structure(session_id: str):
+@app.get("/render/{session_id}/pdf")
+async def render_session_pdf(session_id: str, request: Request):
+    """高保真 PDF：经独立渲染服务用 LibreOffice 计算域后导出。
+
+    与 /download（原始 .docx，域未计算）互补——本接口页码/题注/交叉引用为正确值。
+    渲染服务未启用/不可达 → 503 友好提示，不影响其余功能。
+    """
     doc_path = WORK_DIR / session_id / "current.docx"
     if not doc_path.exists():
         raise HTTPException(404, "会话不存在或文档已丢失")
+    await _auth.require_owner(session_id, request)
+    from .render_client import RenderUnavailable, render_pdf
+    try:
+        pdf = await render_pdf(str(doc_path))
+    except RenderUnavailable as e:
+        raise HTTPException(503, str(e))
+    import io as _io
+    from fastapi.responses import StreamingResponse
+    return StreamingResponse(
+        _io.BytesIO(pdf),
+        media_type="application/pdf",
+        headers={"Content-Disposition": 'inline; filename="preview.pdf"'},
+    )
+
+
+@app.get("/render/{session_id}/preview")
+async def render_session_preview(session_id: str, request: Request, dpi: int = 120):
+    """分页 PNG（zip）：前端可做与 docx-preview 并存的高保真预览开关。"""
+    doc_path = WORK_DIR / session_id / "current.docx"
+    if not doc_path.exists():
+        raise HTTPException(404, "会话不存在或文档已丢失")
+    await _auth.require_owner(session_id, request)
+    from .render_client import RenderUnavailable, render_preview_zip
+    try:
+        zip_bytes = await render_preview_zip(str(doc_path), dpi=max(60, min(dpi, 300)))
+    except RenderUnavailable as e:
+        raise HTTPException(503, str(e))
+    from fastapi.responses import Response
+    return Response(zip_bytes, media_type="application/zip")
+
+
+@app.get("/structure/{session_id}")
+async def get_structure(session_id: str, request: Request):
+    doc_path = WORK_DIR / session_id / "current.docx"
+    if not doc_path.exists():
+        raise HTTPException(404, "会话不存在或文档已丢失")
+    await _auth.require_owner(session_id, request)
     try:
         sections = get_thesis_structure(str(doc_path))
     except Exception as e:
@@ -246,11 +520,11 @@ async def batch_format(
     feature_ids: str = Form("[]"),
     message: str = Form(""),
 ):
-    """对多份 docx 应用同一套排版（默认功能勾选 + 可选自定义指令）。
+    """多文档同规则排版。
 
-    feature_ids: JSON 数组字符串，对应 /apply_defaults 的格式
-    message:     可选自定义指令；若提供则用首份文档的上下文解析一次，复用到全部文件
-    返回：批次 id、每份文件的处理状态；可通过 GET /batch/{id}/download 下载 zip。
+    Redis 已配置：入队交给 web-worker 异步处理，返回 {batch_id, job_id, queued:true}，
+                  前端轮询 GET /jobs/{job_id}（或订阅 SSE）取进度与结果。
+    Redis 未配置：同步降级处理，直接返回完整结果（向后兼容，离线开发可用）。
     """
     if not files:
         raise HTTPException(400, "至少上传一份 .docx 文件")
@@ -265,114 +539,95 @@ async def batch_format(
     except (ValueError, _json.JSONDecodeError) as e:
         raise HTTPException(400, f"feature_ids 格式错误：{e}")
 
+    from .batch_core import applied_default_names, dedupe_names, run_batch
+
+    raw = [(f.filename or "doc.docx", await f.read()) for f in docx_files]
+    saved = dedupe_names(raw)   # [(safe_name, bytes)]
     batch_id = uuid.uuid4().hex
-    batch_dir = BATCH_DIR / batch_id
-    in_dir    = batch_dir / "in"
-    out_dir   = batch_dir / "out"
-    in_dir.mkdir(parents=True, exist_ok=True)
-    out_dir.mkdir(parents=True, exist_ok=True)
 
-    # 1) 落盘所有文件（避免 UploadFile 流式状态污染）+ 处理重名
-    saved = []   # [(safe_name, in_path)]
-    seen  = set()
-    for f in docx_files:
-        safe = _safe_filename(f.filename or "doc.docx")
-        base, ext = (safe[:-5], ".docx") if safe.endswith(".docx") else (safe, ".docx")
-        candidate = safe
-        i = 1
-        while candidate in seen:
-            candidate = f"{base}({i}){ext}"
-            i += 1
-        seen.add(candidate)
-        in_path = in_dir / candidate
-        with open(in_path, "wb") as fp:
-            shutil.copyfileobj(f.file, fp)
-        saved.append((candidate, in_path))
-
-    # 2) 自定义指令：仅解析一次（用首份文档的上下文，section: 类目标按首份文档对齐）
-    custom_ops_raw = []
-    custom_parse_error = None
-    if message and message.strip():
+    from .redis_client import redis_configured
+    if redis_configured():
         try:
-            first_path = saved[0][1]
-            try:
-                ctx_styles = get_used_paragraph_styles(str(first_path))
-                ctx_struct = get_document_structure(str(first_path))
-                ctx_title  = get_document_title(str(first_path))
-            except Exception:
-                ctx_styles = ctx_struct = None
-                ctx_title  = ""
-            parsed = parse_command(
-                message,
-                available_styles=ctx_styles,
-                doc_structure=ctx_struct,
-                doc_title=ctx_title,
-            )
-            custom_ops_raw = [op.model_dump(exclude_none=True) for op in parsed.operations]
+            from .queue import enqueue_batch
+            job_id = await enqueue_batch(saved, feature_id_list, message, batch_id)
+            return {"batch_id": batch_id, "job_id": job_id, "queued": True}
         except Exception as e:
-            custom_parse_error = str(e)
+            # 入队失败（如 Redis 临时不可达）→ 不让用户卡住，回退同步
+            _ = e
 
-    # 3) 逐份处理
-    results = []
-    for name, in_path in saved:
-        if custom_parse_error is not None:
-            # 自定义指令解析失败 → 整批失败（用户应当意识到指令问题）
-            results.append({"filename": name, "status": "error",
-                            "error": f"自定义指令解析失败：{custom_parse_error}"})
-            continue
+    result = await asyncio.to_thread(
+        run_batch, saved, feature_id_list, message, BATCH_DIR / batch_id, None
+    )
+    result["batch_id"] = batch_id
+    result["applied"] = applied_default_names(feature_id_list)
+    result["download_url"] = (
+        f"/batch/{batch_id}/download" if result["success_count"] > 0 else None
+    )
+    result["queued"] = False
+    return result
 
+
+@app.get("/jobs/{job_id}")
+async def job_get(job_id: str):
+    """查询异步 job 状态/进度/结果（批量、异步渲染共用）。"""
+    from .redis_client import redis_configured
+    if not redis_configured():
+        raise HTTPException(409, "未配置 Redis，无异步任务")
+    from .queue import job_status
+    try:
+        return await job_status(job_id)
+    except Exception as e:
+        raise HTTPException(500, f"查询任务失败：{e}")
+
+
+@app.get("/jobs/{job_id}/events")
+async def job_events(job_id: str):
+    """SSE 实时进度：订阅 web55:progress:{job_id}；完成/失败后补发终态并关闭。"""
+    from .redis_client import redis_configured
+    if not redis_configured():
+        raise HTTPException(409, "未配置 Redis，无异步任务")
+
+    from fastapi.responses import StreamingResponse
+
+    from .queue import job_status
+    from .redis_client import get_redis
+
+    async def gen():
+        r = await get_redis()
+        pubsub = r.pubsub()
+        await pubsub.subscribe(f"web55:progress:{job_id}")
         try:
-            # 每份文档单独解析 {THESIS_TITLE} / {THESIS_LABEL} 等占位符
+            # 先补发一次当前状态（可能订阅前已有进度）
+            st = await job_status(job_id)
+            yield f"data: {_json.dumps(st, ensure_ascii=False)}\n\n"
+            if st.get("status") in ("complete", "failed", "not_found"):
+                return
+            while True:
+                msg = await pubsub.get_message(
+                    ignore_subscribe_messages=True, timeout=15.0
+                )
+                if msg and msg.get("data"):
+                    yield f"data: {msg['data']}\n\n"
+                # 周期性回查终态（pub/sub 可能错过最后一条）
+                st = await job_status(job_id)
+                if st.get("status") in ("complete", "failed", "not_found"):
+                    yield f"data: {_json.dumps(st, ensure_ascii=False)}\n\n"
+                    return
+                if not msg:
+                    yield ": keep-alive\n\n"
+                    await asyncio.sleep(0)
+        finally:
             try:
-                thesis_title = get_document_title(str(in_path))
+                await pubsub.unsubscribe()
+                await pubsub.aclose()
             except Exception:
-                thesis_title = ""
-            try:
-                thesis_label = get_thesis_label(str(in_path))
-            except Exception:
-                thesis_label = ""
-            default_ops_raw = collect_ops(
-                feature_id_list, thesis_title=thesis_title, thesis_label=thesis_label
-            )
-            all_ops_raw = default_ops_raw + custom_ops_raw
-            if not all_ops_raw:
-                results.append({"filename": name, "status": "error",
-                                "error": "未勾选默认功能且无自定义指令"})
-                continue
+                pass
 
-            # 走与 /chat 同样的 Pydantic 校验
-            pc = ParsedCommand.model_validate({"operations": all_ops_raw, "explanation": ""})
-
-            out_path = out_dir / name
-            apply_operations(str(in_path), str(out_path), pc.operations)
-            results.append({
-                "filename": name,
-                "status": "ok",
-                "ops_count": len(pc.operations),
-                "title_used": thesis_title,
-            })
-        except Exception as e:
-            results.append({"filename": name, "status": "error", "error": str(e)})
-
-    # 4) 打包成功项为 zip
-    ok_count = sum(1 for r in results if r["status"] == "ok")
-    zip_path = batch_dir / "results.zip"
-    if ok_count > 0:
-        with zipfile.ZipFile(zip_path, "w", zipfile.ZIP_DEFLATED) as zf:
-            for r in results:
-                if r["status"] == "ok":
-                    src = out_dir / r["filename"]
-                    if src.exists():
-                        zf.write(src, arcname=r["filename"])
-
-    return {
-        "batch_id":      batch_id,
-        "total":         len(results),
-        "success_count": ok_count,
-        "fail_count":    len(results) - ok_count,
-        "results":       results,
-        "download_url":  f"/batch/{batch_id}/download" if ok_count > 0 else None,
-    }
+    return StreamingResponse(
+        gen(),
+        media_type="text/event-stream",
+        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+    )
 
 
 @app.get("/batch/{batch_id}/download")
@@ -400,6 +655,7 @@ async def list_defaults():
 
 @app.post("/apply_defaults")
 async def apply_defaults(
+    request: Request,
     session_id: str = Form(...),
     feature_ids: str = Form(...),
 ):
@@ -411,6 +667,7 @@ async def apply_defaults(
     doc_path = session_dir / "current.docx"
     if not doc_path.exists():
         raise HTTPException(404, "会话不存在或文档已丢失，请先上传 docx")
+    await _auth.require_owner(session_id, request)
 
     try:
         ids = _json.loads(feature_ids)
@@ -651,6 +908,7 @@ async def zotero_save(
 
 @app.post("/check")
 async def check_thesis(
+    request: Request,
     session_id: str = Form(...),
     categories: str = Form("[]"),
     review: UploadFile = File(None),
@@ -665,6 +923,7 @@ async def check_thesis(
     doc_path = session_dir / "current.docx"
     if not doc_path.exists():
         raise HTTPException(404, "会话不存在或文档已丢失，请先上传论文 docx")
+    await _auth.require_owner(session_id, request)
 
     try:
         cats = _json.loads(categories) if categories else []

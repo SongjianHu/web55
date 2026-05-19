@@ -1,0 +1,21 @@
+# 反向代理 + 自动 HTTPS。
+# 生产：在 .env 设 SITE_ADDRESS=your-domain.edu.cn，Caddy 自动签发 Let's Encrypt 证书。
+# 缺省 localhost：Caddy 用本地自签证书（内网/试运行可用）。
+#
+# compose 的 caddy 服务已 env_file 不直接读 .env；如需域名，在 caddy 服务加
+#   environment: [SITE_ADDRESS=your-domain]
+# 或在此处直接写死域名。
+
+{$SITE_ADDRESS:localhost} {
+	encode zstd gzip
+
+	# 大文件上传（docx/批量）放宽请求体限制
+	request_body {
+		max_size 100MB
+	}
+
+	reverse_proxy web:8000 {
+		# SSE（/chat 流式、渲染进度）需要禁用缓冲
+		flush_interval -1
+	}
+}

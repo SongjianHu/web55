@@ -20,9 +20,26 @@ export default function Toolbar({ onOpenBatch }) {
   } = useSession();
   const [thesisBusy, setThesisBusy] = useState(false);
   const [undoBusy, setUndoBusy] = useState(false);
+  const [pdfBusy, setPdfBusy] = useState(false);
 
   function download() {
     if (sessionId) window.location.href = api.downloadUrl(sessionId);
+  }
+
+  async function highFidelityPdf() {
+    if (!sessionId) return;
+    setPdfBusy(true);
+    try {
+      const blob = await api.fetchRenderedPdf(sessionId);
+      const url = URL.createObjectURL(blob);
+      window.open(url, '_blank', 'noopener');
+      setTimeout(() => URL.revokeObjectURL(url), 60000);
+    } catch (err) {
+      // 渲染服务未启用/不可达 → 后端 503 友好提示，原样展示
+      addError(err.message);
+    } finally {
+      setPdfBusy(false);
+    }
   }
 
   async function applyThesisTemplate() {
@@ -66,6 +83,16 @@ export default function Toolbar({ onOpenBatch }) {
       <Button variant="secondary" size="sm" disabled={!hasDoc} onClick={download}>
         <Icon name="download" size={15} />
         下载文档
+      </Button>
+      <Button
+        variant="secondary"
+        size="sm"
+        disabled={!hasDoc || pdfBusy}
+        onClick={highFidelityPdf}
+        title="用 LibreOffice 计算页码/题注/交叉引用后导出 PDF"
+      >
+        <Icon name="file" size={15} />
+        {pdfBusy ? '渲染中…' : '高保真PDF'}
       </Button>
       <Button
         variant="primary"

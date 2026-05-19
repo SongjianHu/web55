@@ -93,10 +93,14 @@ export default function Composer() {
     setSending(true);
     const thinkId = addMsg('bot', '思考中…');
     try {
-      const data = await api.chat(
+      const data = await api.chatStream(
         sessionId,
         message,
         convoRef.current.slice(-6),
+        (ev) => {
+          // 阶段进度：边出边显，改善感知延迟
+          if (ev.text) updateMsg(thinkId, { text: ev.text });
+        },
       );
       const reply = data.explanation || '已完成修改';
       updateMsg(thinkId, {

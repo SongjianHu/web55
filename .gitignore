@@ -18,6 +18,12 @@ ENV/
 # ───── 运行时数据（每个会话的工作文档，由程序自动创建）─────
 sessions/
 
+# ───── 元数据库（SQLite，含 users/sessions/library；勿提交）─────
+data/
+*.db
+*.db-wal
+*.db-shm
+
 # ───── 密钥与本地配置 ─────
 .env
 .env.local
